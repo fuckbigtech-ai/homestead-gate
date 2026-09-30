@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "homestead-gate"
+version = "0.1.0.dev0"
+description = "Nothing your AI agent sends leaves without a local model review, your yes, and a tamper-evident receipt."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+# 0.4.0 is the first release whose ledger.append takes phase=, which is what makes a
+# record evidence that a decision came BEFORE execution rather than a note written after.
+dependencies = ["homestead-memory>=0.4.0"]
+
+[project.scripts]
+homestead-gate = "homestead_gate.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/homestead_gate"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["model: loads a real local model (opt in with HG_MODEL_TESTS=1)"]

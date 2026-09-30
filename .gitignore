@@ -1,2 +1,4 @@
 bench/runs/_void/
 __pycache__/
+.venv/
+*.egg-info/
