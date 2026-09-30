@@ -3,6 +3,7 @@
   homestead-gate up --task "what you asked the agent to do"   run the gate on 127.0.0.1:6000
   homestead-gate demo                                          hijacked agent vs the gate, end to end
   homestead-gate watch                                         the receipts (same as `hsm watch`)
+  homestead-gate run --allow-host api.anthropic.com -- claude   the agent, sandboxed; the gate is its only way out
   homestead-gate mcp                                           MCP tools for your agent (claude mcp add homestead-gate -- homestead-gate mcp)
 """
 from __future__ import annotations
@@ -49,6 +50,35 @@ def cmd_up(a) -> int:
     except KeyboardInterrupt:
         print("\nstopped.")
     return 0
+
+
+def cmd_run(a) -> int:
+    from homestead_memory.core import ledger as hl
+    from .sandbox import run
+    cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
+    if not cmd:
+        print("usage: homestead-gate run [--allow-host H] -- <agent command>", file=sys.stderr)
+        return 2
+    led = Path(a.ledger).expanduser()
+
+    import time as _time
+    last: dict[str, float] = {}
+
+    def on_deny(host, why):
+        # Agents retry and phone home constantly (Claude Code hit github.com 8 times in one
+        # second). One receipt per host per minute keeps the ledger readable; the first
+        # attempt is always recorded.
+        now = _time.time()
+        if now - last.get(host, 0) < 60:
+            return
+        last[host] = now
+        print(f"  !! blocked egress to {host}: {why}", file=sys.stderr)
+        hl.append("egress.denied", target="egress", summary=f"blocked {host[:80]}: {why}",
+                  meta={"host": host[:200], "reason": why}, vault=led, agent="homestead-gate",
+                  phase=hl.PHASE_PRE)
+
+    return run(cmd, allow_hosts=a.allow_host, gate_port=a.gate_port, model_port=a.model_port,
+               gate_home=HOME, ledger=led, allow_read=a.allow_read, pass_env=a.pass_env, on_deny=on_deny)
 
 
 class _ScriptedReviewer:
@@ -120,6 +150,16 @@ def main(argv=None) -> int:
     d.add_argument("--auto-deny", action="store_true", help="answer 'no' automatically (for recordings)")
     d.add_argument("--delay", type=float, default=60, help="override wait in seconds")
     d.set_defaults(func=cmd_demo)
+
+    r = sub.add_parser("run", help="run an agent sandboxed: internet only to allowed hosts, gate as its way out")
+    r.add_argument("--allow-host", action="append", default=[], help="e.g. api.anthropic.com (repeatable, *.x ok)")
+    r.add_argument("--allow-read", action="append", default=[], help="a path inside a blocked area the agent may read")
+    r.add_argument("--pass-env", action="append", default=[], help="a secret-looking env var to keep, e.g. ANTHROPIC_API_KEY")
+    r.add_argument("--gate-port", type=int, default=6000)
+    r.add_argument("--model-port", type=int, default=11434)
+    r.add_argument("--ledger", default=str(HOME / "ledger"))
+    r.add_argument("cmd", nargs=argparse.REMAINDER, help="-- the agent command")
+    r.set_defaults(func=cmd_run)
 
     m = sub.add_parser("mcp", help="MCP server for your agent: send email / prepare tx, only via the gate")
     m.add_argument("--gate", default="http://127.0.0.1:6000")

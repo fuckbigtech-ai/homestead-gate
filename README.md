@@ -57,14 +57,33 @@ Each request goes through, in order:
 In this version email is dry-run (written to `~/.homestead-gate/outbox`) and wallet transactions
 are prepared for Sepolia only, unsigned. The gate holds no keys.
 
+### Make the gate the only way out (macOS)
+
+```bash
+homestead-gate run --allow-host api.anthropic.com --allow-read ~/Library/Keychains -- claude
+```
+
+The agent runs in the macOS sandbox. It can reach the gate, the local model and the hosts you
+allow (through a small proxy on your machine), and nothing else: no direct internet, no ssh-agent,
+no Docker socket. It can't read `~/.ssh`, cloud CLI credentials, `.env` files or registry tokens,
+it can't write the gate's policy or receipts, and it can't edit your shell startup files or
+LaunchAgents. Secret-looking environment variables are dropped unless you pass `--pass-env`.
+Every blocked connection is written to the receipts.
+
+Claude Code keeps its login in the macOS keychain, hence `--allow-read ~/Library/Keychains`.
+That also lets the agent ask the keychain for other items; macOS prompts you for most of them,
+but read the prompt before you click. Linux (bubblewrap) is next.
+
 ### What it does not defend against
 
 - **An agent that can reach your accounts some other way.** If the agent has your SMTP password,
-  API tokens or a wallet key, it can skip the gate. The gate only works when it is the agent's
-  only way out. Sandboxing the agent is the next milestone.
-- **An agent that can type in your terminal or edit the gate's files.** Approval happens only in
-  the gate's terminal (there is no approve endpoint), but an unsandboxed agent running as you can
-  still stop or reconfigure the gate.
+  API tokens or a wallet key, it can skip the gate. Use `homestead-gate run`; without it, the
+  gate only works for agents that choose to use it. An allowed host is still a way out: anything
+  the agent can send to `api.anthropic.com` leaves your machine.
+- **An unsandboxed agent running as you.** Approval happens only in the gate's terminal (there is
+  no approve endpoint), but outside `homestead-gate run` an agent can stop or reconfigure the gate.
+  Inside it, it can still send signals to your other processes; the sandbox limits files and
+  network, not everything.
 - **An agent that hides what it read.** The model sees what the agent reports reading. A hijacked
   agent can leave the injection out, and then the model judges the action against your task alone.
   Your task comes from you when you start the gate, never from the agent.
