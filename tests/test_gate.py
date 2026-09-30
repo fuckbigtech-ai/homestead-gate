@@ -260,3 +260,20 @@ def test_demo_without_model_review_exits_nonzero(monkeypatch, capsys):
     monkeypatch.setattr(reviewer.OllamaReviewer, "review",
                         lambda self, p: Verdict("invalid", "unavailable", "", "m", 0.0))
     assert cli_main(["demo", "--auto-deny"]) == 1
+
+
+def test_fingerprint_covers_what_the_action_does_and_nothing_else():
+    from homestead_gate.core import payload_hash
+    a = {"type": "email", "to": ME, "subject": "s", "body": "b"}
+    assert payload_hash(a, "v1") == payload_hash({**a, "note": "agent commentary", "ts": 123}, "v1")
+    assert payload_hash(a, "v1") != payload_hash({**a, "body": "b2"}, "v1")
+    assert payload_hash(a, "v1") != payload_hash({**a, "attachments": ["x.pdf"]}, "v1")
+    assert payload_hash(a, "v1") != payload_hash(a, "v2")
+
+
+def test_policy_version_recorded_and_changes_with_rules(tmp_path):
+    g, _ = make_gate(tmp_path, answers=())
+    g.submit({"action": {"type": "email", "to": ME}})
+    pv = records(tmp_path)[0]["meta"]["policy_version"]
+    assert pv == g.policy.version and len(pv) == 16
+    assert Policy(user_email=ME, max_value_eth=1).version != Policy(user_email=ME).version

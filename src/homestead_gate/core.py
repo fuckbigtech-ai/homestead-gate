@@ -35,8 +35,23 @@ class Approver(Protocol):
     def ask(self, *, rid: str, action: dict, flagged: bool, review_reason: str, span: str) -> HumanDecision: ...
 
 
-def payload_hash(action: dict) -> str:
-    return hashlib.sha256(json.dumps(action, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+# The fields that decide what an action DOES, chosen by code per type, never by the model.
+# Anything else in the request (notes, timestamps, the agent's commentary) cannot change the
+# fingerprint, and anything here that changes produces a different one.
+TYPED_FIELDS = {
+    "email": ("type", "to", "cc", "bcc", "subject", "body", "attachments"),
+    "wallet_tx": ("type", "chain_id", "to", "value_eth", "data"),
+}
+
+
+def typed_action(action: dict) -> dict:
+    fields = TYPED_FIELDS.get(action.get("type"), tuple(sorted(action)))
+    return {k: action.get(k) for k in fields}
+
+
+def payload_hash(action: dict, policy_version: str = "") -> str:
+    body = {"action": typed_action(action), "policy_version": policy_version}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def describe(action: dict) -> str:
@@ -62,7 +77,8 @@ class Gate:
         reads = request.get("read") or []
         rid = uuid.uuid4().hex[:10]
         target = f"gate:{action.get('type', '?')}"
-        base = {"request_id": rid, "payload_sha256": payload_hash(action)}
+        pv = self.policy.version
+        base = {"request_id": rid, "payload_sha256": payload_hash(action, pv), "policy_version": pv}
         pre = lambda a, s, **m: self._log(a, s, {**base, **m}, ledger.PHASE_PRE, target)
         post = lambda a, s, **m: self._log(a, s, {**base, **m}, ledger.PHASE_POST, target)
 

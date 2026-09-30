@@ -11,6 +11,8 @@ Three outcomes per request:
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
 import tomllib
@@ -60,6 +62,14 @@ class Policy:
             # v1 is testnet only. Refusing to load beats a mainnet transaction nobody meant.
             raise ValueError(f"chain_id {p.chain_id} refused: v1 supports Sepolia ({SEPOLIA}) only")
         return p
+
+    @property
+    def version(self) -> str:
+        """Short hash of every rule. Recorded with each decision so an approval given under one
+        set of rules is never mistaken for one given under another (u/arthaudm, 2026-09-30:
+        "include the policy version so a changed rule can't reuse an old approval")."""
+        rules = {k: v for k, v in sorted(vars(self).items()) if not k.startswith("_")}
+        return hashlib.sha256(json.dumps(rules, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
     @property
     def identity(self) -> str:
