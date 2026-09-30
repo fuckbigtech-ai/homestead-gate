@@ -11,6 +11,7 @@ Three outcomes per request:
 """
 from __future__ import annotations
 
+import threading
 import time
 import tomllib
 from collections import deque
@@ -36,6 +37,7 @@ class Policy:
     override_delay_s: float = 60
     approval_timeout_s: float = 300
     _recent: deque = field(default_factory=deque, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     @classmethod
     def load(cls, path: str | Path) -> "Policy":
@@ -79,11 +81,12 @@ class Policy:
     def check(self, action: dict, now: float | None = None) -> tuple[str, str]:
         """Return (outcome, reason). Counts the action against the hourly cap."""
         now = time.time() if now is None else now
-        while self._recent and now - self._recent[0] > 3600:
-            self._recent.popleft()
-        if len(self._recent) >= self.max_actions_per_hour:
-            return "deny", f"over {self.max_actions_per_hour} actions this hour"
-        self._recent.append(now)
+        with self._lock:      # the daemon handles requests on parallel threads
+            while self._recent and now - self._recent[0] > 3600:
+                self._recent.popleft()
+            if len(self._recent) >= self.max_actions_per_hour:
+                return "deny", f"over {self.max_actions_per_hour} actions this hour"
+            self._recent.append(now)
 
         kind = action.get("type")
         if kind not in ("email", "wallet_tx"):
