@@ -120,7 +120,15 @@ def test_live_send_only_after_both_yeses(tmp_path, monkeypatch, store):
 def _up_args(tmp_path, **kw):
     pol = tmp_path / "policy.toml"
     pol.write_text(f'[user]\nemail = "{kw.pop("policy_email", ME)}"\n')
-    return argparse.Namespace(policy=str(pol), ledger=str(tmp_path / "l"), port=0, task="t", live=True, **kw)
+    return argparse.Namespace(policy=str(pol), ledger=str(tmp_path / "l"), port=0, task="t", live=True,
+                              email=None, wallet=None, model=None, yes=False, pull=False, dry_run=False, **kw)
+
+
+@pytest.fixture(autouse=True)
+def _any_machine_fits(monkeypatch):
+    # `up` checks the reviewer fits this machine's RAM; these tests are about credentials, not hardware.
+    import homestead_gate.cli as cli
+    monkeypatch.setattr(cli, "_fits", lambda *a, **k: True)
 
 
 def test_up_live_refuses_without_credentials(tmp_path, store):

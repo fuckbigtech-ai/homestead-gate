@@ -1,6 +1,7 @@
 """homestead-gate: nothing your agent sends leaves without two yeses and a receipt.
 
-  homestead-gate up --task "what you asked the agent to do"   run the gate on 127.0.0.1:6000
+  homestead-gate up                                            set up if needed, then run the gate on 127.0.0.1:6000
+  homestead-gate doctor                                        one-screen health check
   homestead-gate demo                                          hijacked agent vs the gate, end to end
   homestead-gate watch                                         the receipts (same as `hsm watch`)
   homestead-gate run --allow-host api.anthropic.com -- claude   the agent, sandboxed; the gate is its only way out
@@ -10,10 +11,12 @@ from __future__ import annotations
 
 import argparse
 import secrets
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
+from . import hardware, installer
 from .approval import TerminalApprover
 from .core import Gate
 from .policy import Policy
@@ -28,36 +31,171 @@ def _watch(ledger_dir: Path, n: int = 30) -> int:
     return hsm.main(["watch", str(ledger_dir), "-n", str(n)])
 
 
-def cmd_up(a) -> int:
+def _ask(prompt: str) -> str:
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return ""
+
+
+def _fits(model: str, hw: dict, pick) -> bool:
+    """Refuse a measured reviewer that does not fit this machine: the first review would load
+    it anyway, and an unguarded load that does not fit can take the machine down."""
+    r = hardware.REVIEWERS.get(model)
+    if r is None:
+        print(f"            fit unknown for {model}: not a GateBench-measured tag, so not checked")
+        return True
+    verdict, need, usable = hardware.verdict(r, hw)
+    if verdict == "no":
+        alt = f" Use {pick.model} instead (--model {pick.model}, or edit the policy)." if pick.model else ""
+        print(f"  reviewer: refusing {model}: it needs {need}GB and this machine has {usable}GB usable "
+              f"for a model.{alt}", file=sys.stderr)
+        return False
+    return True
+
+
+def _live_smtp(policy: Policy):
+    """For --live: the stored SMTP credentials, or an exit code. The gate only sends AS the user it
+    protects, so an agent can never pick the From."""
     from . import credstore
-    policy = Policy.load(a.policy)
-    smtp, live = None, False
-    if a.live:
+    try:
+        smtp = credstore.load_smtp()
+    except credstore.CredentialError as e:
+        print(f"cannot go live: {e}", file=sys.stderr); return None, 2
+    if not smtp:
+        print("cannot go live: no email credentials. Run `homestead-gate creds set-smtp` first.", file=sys.stderr)
+        return None, 2
+    if smtp["user"].lower() != (policy.user_email or "").lower():
+        print(f"cannot go live: the credentials are for {smtp['user']} but the policy's user email is "
+              f"{policy.user_email!r}. They must match.", file=sys.stderr)
+        return None, 2
+    return smtp, 0
+
+
+def cmd_up(a) -> int:
+    """Find the machine, write a policy if there is none, check Ollama and the reviewer
+    model, then start the gate. Never downloads or loads a model unless --pull is passed."""
+    policy_path = Path(a.policy).expanduser()
+    if a.yes and not a.task and not a.dry_run:
+        print("homestead-gate up: --task is required with --yes: what you asked the agent to do. "
+              "The reviewer trusts only this.", file=sys.stderr)
+        return 2
+    hw = hardware.detect()
+    pick = hardware.pick_reviewer(hw)
+    print("homestead-gate up" + ("  (dry run: nothing is written, pulled or started)" if a.dry_run else ""))
+    print(f"  machine:  {hardware.describe(hw)}")
+
+    if policy_path.exists():
         try:
-            smtp = credstore.load_smtp()
-        except credstore.CredentialError as e:
-            print(f"cannot go live: {e}", file=sys.stderr); return 2
-        if not smtp:
-            print("cannot go live: no email credentials. Run `homestead-gate creds set-smtp` first.", file=sys.stderr)
+            policy = Policy.load(policy_path)
+        except Exception as e:  # noqa: BLE001 - any parse or validation error means "fix the file"
+            print(f"  policy:   {policy_path} is invalid: {e}", file=sys.stderr)
+            return 1
+        print(f"  policy:   {policy_path} (reviewer {policy.model})")
+        if not _fits(policy.model, hw, pick):
+            return 1
+        if pick.model and policy.model != pick.model:
+            print(f"            note: for this machine the pick would be {pick.model}: {pick.reason}")
+    else:
+        model = a.model or pick.model
+        if model is None:
+            print(f"  reviewer: refusing. {pick.reason}", file=sys.stderr)
+            return 1
+        if a.model and not _fits(a.model, hw, pick):
+            return 1
+        print(f"  reviewer: {model}: {'chosen with --model' if a.model else pick.reason}")
+        print(f"  policy:   none at {policy_path}. Will write it from policy.example.toml with your")
+        print("            email, wallet and the reviewer above. The example's placeholder email allowlist")
+        print("            starts empty; every other rule keeps the example's value.")
+        email, wallet = a.email, a.wallet
+        if email is None:
+            if a.yes:
+                print("  --yes needs --email (mail to yourself is the one thing that passes without asking).",
+                      file=sys.stderr)
+                return 2
+            email = _ask("  your email (mail to it passes without asking): ")
+        if wallet is None:
+            wallet = "" if a.yes else _ask("  your own wallet address, 0x... (blank for none): ")
+        if not installer.valid_email(email):
+            print(f"  not an email address: {email!r}", file=sys.stderr)
             return 2
-        if smtp["user"].lower() != (policy.user_email or "").lower():
-            # The gate only sends AS the user it protects; an agent must not be able to pick the From.
-            print(f"cannot go live: the credentials are for {smtp['user']} but the policy's user email is "
-                  f"{policy.user_email!r}. They must match.", file=sys.stderr)
+        if not installer.valid_wallet(wallet):
+            print(f"  not a wallet address (0x + 40 hex characters): {wallet!r}", file=sys.stderr)
             return 2
-        live = True
+        if a.dry_run:
+            print(f"            would write {policy_path}: email {email}, wallet {wallet or '(none)'}, model {model}")
+            policy = Policy(user_email=email, user_wallet=wallet, model=model)
+        else:
+            policy = installer.write_policy(policy_path, email, wallet, model)
+            print(f"            wrote {policy_path}")
+
+    smtp = None
+    if getattr(a, "live", False):
+        smtp, rc = _live_smtp(policy)
+        if rc:
+            return rc
+        print(f"  email:    LIVE, sent as {smtp['user']} via {smtp['host']}")
+
+    # Ollama: two read-only questions (/api/version, /api/tags). Neither loads a model.
+    version = installer.ollama_version(policy.ollama_url)
+    present = False
+    if version is None:
+        if shutil.which("ollama"):
+            print(f"  ollama:   installed but not answering at {policy.ollama_url}. Start it: ollama serve")
+        else:
+            print(f"  ollama:   not installed. Install it: {installer.install_hint(hw['os'])}")
+        print(f"  model:    unknown until Ollama answers. Then: {installer.pull_command(policy.model)}"
+              f"  ({installer.size_note(policy.model)})")
+    else:
+        print(f"  ollama:   {version} at {policy.ollama_url}")
+        present = installer.model_present(policy.model, installer.ollama_models(policy.ollama_url) or [])
+        if present:
+            print(f"  model:    {policy.model} is downloaded")
+        else:
+            print(f"  model:    {policy.model} is not downloaded. To get it: "
+                  f"{installer.pull_command(policy.model)}  ({installer.size_note(policy.model)})")
+            if a.pull and a.dry_run:
+                print("            --pull ignored in a dry run")
+            elif a.pull:
+                if installer.pull(policy.model) == 0:
+                    present = installer.model_present(policy.model,
+                                                      installer.ollama_models(policy.ollama_url) or [])
+                print(f"            {'downloaded' if present else 'still missing'}")
+            else:
+                print("            not pulled. Run that command, or rerun with --pull.")
+
+    task = a.task
+    if not task and not a.dry_run:
+        task = _ask("  task (what you asked the agent to do; the reviewer trusts only this): ")
+        if not task:
+            print("  no task given; not starting.", file=sys.stderr)
+            return 2
+
+    if a.dry_run:
+        print(f"  task:     {task or '(not set; pass --task)'}")
+        print(f"  next:     would start the gate on 127.0.0.1:{a.port}" +
+              ("" if version and present else " (reviewer not ready: see above)"))
+        return 0
+    if not (version and present):
+        print("\n  WARNING: the reviewer is not ready. The gate starts anyway and fails closed: every")
+        print("  request that is not to yourself counts as flagged and waits for your yes.\n")
+    return _serve(policy, a, task, smtp)
+
+
+def _serve(policy: Policy, a, task: str, smtp=None) -> int:
+    live = smtp is not None
     ledger_dir = Path(a.ledger).expanduser()
     session = secrets.token_hex(4)
     gate = Gate(policy=policy,
                 reviewer=OllamaReviewer(policy.model, policy.ollama_url, policy.review_timeout_s),
                 approver=TerminalApprover(override_delay_s=policy.override_delay_s,
                                           timeout_s=policy.approval_timeout_s),
-                ledger_dir=ledger_dir, task=a.task, session=session,
+                ledger_dir=ledger_dir, task=task, session=session,
                 outbox=HOME / "outbox", smtp=smtp, live=live)
     from .daemon import make_server
     srv = make_server(gate, port=a.port)
     print(f"homestead-gate on 127.0.0.1:{a.port}  session {session}")
-    print(f"  task:     {a.task}")
+    print(f"  task:     {task}")
     print(f"  reviewer: {policy.model} (local)")
     print(f"  receipts: {ledger_dir}  (homestead-gate watch)")
     print(f"  email is LIVE: approved mail is sent as {policy.user_email} via {smtp['host']}. the agent never sees the password."
@@ -68,6 +206,62 @@ def cmd_up(a) -> int:
     except KeyboardInterrupt:
         print("\nstopped.")
     return 0
+
+
+def cmd_doctor(a) -> int:
+    """One screen: is everything the gate needs in place. Exit 1 if anything is not."""
+    from homestead_memory.core import ledger as hl
+    rows: list[tuple[bool, str, str]] = []
+    policy_path = Path(a.policy).expanduser()
+    hw = hardware.detect()
+    pick = hardware.pick_reviewer(hw)
+    policy = None
+    if not policy_path.exists():
+        rows.append((False, "policy", f"none at {policy_path}. Run: homestead-gate up"))
+    else:
+        try:
+            policy = Policy.load(policy_path)
+            rows.append((True, "policy", f"{policy_path} (you: {policy.identity or 'not set'})"))
+        except Exception as e:  # noqa: BLE001
+            rows.append((False, "policy", f"{policy_path} is invalid: {e}"))
+    url = policy.ollama_url if policy else "http://127.0.0.1:11434"
+    model = policy.model if policy else pick.model
+    version = installer.ollama_version(url)
+    if version:
+        rows.append((True, "ollama", f"{version} at {url}"))
+    elif shutil.which("ollama"):
+        rows.append((False, "ollama", f"installed, not answering at {url}. Run: ollama serve"))
+    else:
+        rows.append((False, "ollama", f"not installed. {installer.install_hint(hw['os'])}"))
+    if not model:
+        rows.append((False, "model", pick.reason))
+    elif version is None:
+        rows.append((False, "model", f"{model}: unknown, Ollama is not answering"))
+    elif installer.model_present(model, installer.ollama_models(url) or []):
+        rows.append((True, "model", f"{model} downloaded ({installer.model_note(model)})"))
+    else:
+        rows.append((False, "model", f"{model} not downloaded. Run: {installer.pull_command(model)}"
+                                     f"  ({installer.size_note(model)})"))
+    ledger_dir = Path(a.ledger).expanduser()
+    lf = ledger_dir / hl.LEDGER_REL
+    breaks = hl.verify_chain(vault=ledger_dir)
+    if breaks:
+        rows.append((False, "ledger", f"{len(breaks)} break(s) in {lf}, first at record "
+                                      f"{breaks[0].index}: {breaks[0].detail}"))
+    elif lf.exists():
+        n = sum(1 for line in lf.read_text().splitlines() if line.strip())
+        rows.append((True, "ledger", f"{n} receipts, chain verifies ({lf})"))
+    else:
+        rows.append((True, "ledger", f"no receipts yet ({lf})"))
+    ok, what = installer.sandbox_backend()
+    rows.append((ok, "sandbox", what + (" (for homestead-gate run)" if ok else "")))
+
+    print(f"homestead-gate doctor   {hardware.describe(hw)}")
+    for good, name, detail in rows:
+        print(f"  {'ok  ' if good else 'FAIL'}  {name:8} {detail}")
+    bad = sum(1 for g, _, _ in rows if not g)
+    print("all good." if not bad else f"{bad} problem(s).")
+    return 0 if not bad else 1
 
 
 def cmd_run(a) -> int:
@@ -215,13 +409,25 @@ def main(argv=None) -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    u = sub.add_parser("up", help="run the gate in this terminal (approvals are asked here)")
-    u.add_argument("--task", required=True, help="what you asked the agent to do; the reviewer trusts only this")
+    u = sub.add_parser("up", help="set up if needed, then run the gate in this terminal (approvals are asked here)")
+    u.add_argument("--task", help="what you asked the agent to do; the reviewer trusts only this (asked if omitted)")
     u.add_argument("--policy", default=str(HOME / "policy.toml"))
     u.add_argument("--ledger", default=str(HOME / "ledger"))
     u.add_argument("--port", type=int, default=6000)
     u.add_argument("--live", action="store_true", help="really send approved email with the gate's stored credentials")
+    u.add_argument("--email", help="your email, for a new policy (mail to it passes without asking)")
+    u.add_argument("--wallet", help="your own wallet address, for a new policy (default: none)")
+    u.add_argument("--model", help="reviewer model for a new policy (default: picked for this machine)")
+    u.add_argument("--yes", action="store_true", help="ask nothing; take everything from flags")
+    u.add_argument("--pull", action="store_true",
+                   help="download the reviewer model if missing (through model-load-guard when on PATH)")
+    u.add_argument("--dry-run", action="store_true", help="show what would happen; write, pull and start nothing")
     u.set_defaults(func=cmd_up)
+
+    dr = sub.add_parser("doctor", help="one-screen health check; exits 1 if anything is missing")
+    dr.add_argument("--policy", default=str(HOME / "policy.toml"))
+    dr.add_argument("--ledger", default=str(HOME / "ledger"))
+    dr.set_defaults(func=cmd_doctor)
 
     d = sub.add_parser("demo", help="a hijacked agent against the gate, in a throwaway ledger")
     d.add_argument("--model", default=None, help="reviewer model (default qwen3.5:9b)")
