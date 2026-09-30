@@ -67,6 +67,8 @@ def profile(*, home: Path, gate_home: Path, ledger: Path, ports: list[int],
         path = Path(rel).expanduser()
         path = path if path.is_absolute() else home / rel
         lines.append(f"(deny file-read* (subpath {_q(path)}))")
+    # the gate's own sender settings (host/user; the password is in the OS store, not here)
+    lines.append(f"(deny file-read* (literal {_q(Path(gate_home) / 'smtp.toml')}))")
     lines.append('(deny file-read* (regex #"/\\.env$"))')
     lines.append('(deny file-read* (regex #"/\\.env\\.[^/]+$"))')
     lines += ["", ";; the gate's own state, and anything that runs later outside the sandbox"]

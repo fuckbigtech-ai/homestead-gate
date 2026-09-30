@@ -82,6 +82,24 @@ Claude Code keeps its login in the macOS keychain, hence `--allow-read ~/Library
 That also lets the agent ask the keychain for other items; macOS prompts you for most of them,
 but read the prompt before you click. Linux (bubblewrap) is next.
 
+### Credential custody: the gate holds the keys, not the agent
+
+```bash
+homestead-gate creds set-smtp --host smtp.example.com --user you@example.com   # you type the password into the OS prompt
+homestead-gate up --live --task "..."                                           # approved mail is really sent
+```
+
+If the agent holds your email password or an API token, it can send without asking the gate. So the
+gate keeps them: the password goes into the macOS keychain (Linux: libsecret) under the gate's own
+entry, restricted to the gate's program. The agent's environment never contains it, the sandbox hides
+the gate's settings file, and the password is never an argument, a log line or a receipt. The gate
+only sends as the user it protects: if the stored account isn't the policy's email, `--live` refuses
+to start. Without `--live`, approved mail still goes to a local outbox.
+
+Limits: another program running as you can still ask the keychain for the entry. macOS answers with
+a visible permission dialog rather than the password, so say no to anything that isn't the gate. A
+compromised gate process has the password. Linux needs libsecret; there is no plaintext fallback.
+
 ### What it does not defend against
 
 - **An agent that can reach your accounts some other way.** If the agent has your SMTP password,

@@ -29,7 +29,23 @@ def _watch(ledger_dir: Path, n: int = 30) -> int:
 
 
 def cmd_up(a) -> int:
+    from . import credstore
     policy = Policy.load(a.policy)
+    smtp, live = None, False
+    if a.live:
+        try:
+            smtp = credstore.load_smtp()
+        except credstore.CredentialError as e:
+            print(f"cannot go live: {e}", file=sys.stderr); return 2
+        if not smtp:
+            print("cannot go live: no email credentials. Run `homestead-gate creds set-smtp` first.", file=sys.stderr)
+            return 2
+        if smtp["user"].lower() != (policy.user_email or "").lower():
+            # The gate only sends AS the user it protects; an agent must not be able to pick the From.
+            print(f"cannot go live: the credentials are for {smtp['user']} but the policy's user email is "
+                  f"{policy.user_email!r}. They must match.", file=sys.stderr)
+            return 2
+        live = True
     ledger_dir = Path(a.ledger).expanduser()
     session = secrets.token_hex(4)
     gate = Gate(policy=policy,
@@ -37,14 +53,16 @@ def cmd_up(a) -> int:
                 approver=TerminalApprover(override_delay_s=policy.override_delay_s,
                                           timeout_s=policy.approval_timeout_s),
                 ledger_dir=ledger_dir, task=a.task, session=session,
-                outbox=HOME / "outbox", smtp=None, live=False)
+                outbox=HOME / "outbox", smtp=smtp, live=live)
     from .daemon import make_server
     srv = make_server(gate, port=a.port)
     print(f"homestead-gate on 127.0.0.1:{a.port}  session {session}")
     print(f"  task:     {a.task}")
     print(f"  reviewer: {policy.model} (local)")
     print(f"  receipts: {ledger_dir}  (homestead-gate watch)")
-    print("  email is dry-run: messages land in ~/.homestead-gate/outbox. wallet tx are prepared, never signed.")
+    print(f"  email is LIVE: approved mail is sent as {policy.user_email} via {smtp['host']}. the agent never sees the password."
+          if live else "  email is DRY-RUN: approved messages land in ~/.homestead-gate/outbox (use --live after `creds set-smtp`).")
+    print("  wallet transactions are prepared unsigned, never signed or sent.")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -79,6 +97,24 @@ def cmd_run(a) -> int:
 
     return run(cmd, allow_hosts=a.allow_host, gate_port=a.gate_port, model_port=a.model_port,
                gate_home=HOME, ledger=led, allow_read=a.allow_read, pass_env=a.pass_env, on_deny=on_deny)
+
+
+def cmd_creds_set(a) -> int:
+    from . import credstore
+    try:
+        print(f"storing {a.user} via {a.host}:{a.port}. the OS will ask for the password; it never passes through here.")
+        credstore.store_smtp(a.host, a.port, a.user, starttls=not a.no_starttls)
+    except credstore.CredentialError as e:
+        print(f"not stored: {e}", file=sys.stderr); return 2
+    print(credstore.status())
+    return 0
+
+
+def cmd_creds_clear(a) -> int:
+    from . import credstore
+    credstore.clear()
+    print("smtp credentials removed")
+    return 0
 
 
 class _ScriptedReviewer:
@@ -173,6 +209,7 @@ def main(argv=None) -> int:
     u.add_argument("--policy", default=str(HOME / "policy.toml"))
     u.add_argument("--ledger", default=str(HOME / "ledger"))
     u.add_argument("--port", type=int, default=6000)
+    u.add_argument("--live", action="store_true", help="really send approved email with the gate's stored credentials")
     u.set_defaults(func=cmd_up)
 
     d = sub.add_parser("demo", help="a hijacked agent against the gate, in a throwaway ledger")
@@ -196,6 +233,17 @@ def main(argv=None) -> int:
     m.add_argument("--gate", default="http://127.0.0.1:6000")
     m.add_argument("--timeout", type=float, default=600, help="seconds to wait for your decision")
     m.set_defaults(func=lambda a: __import__("homestead_gate.mcp", fromlist=["serve"]).serve(a.gate, a.timeout))
+
+    cr = sub.add_parser("creds", help="the gate's own email credentials (the agent never sees them)")
+    crs = cr.add_subparsers(dest="creds_cmd", required=True)
+    cs = crs.add_parser("set-smtp", help="store SMTP settings; you type the password into the OS prompt")
+    cs.add_argument("--host", required=True)
+    cs.add_argument("--port", type=int, default=587)
+    cs.add_argument("--user", required=True, help="the email address the gate sends as")
+    cs.add_argument("--no-starttls", action="store_true")
+    cs.set_defaults(func=cmd_creds_set)
+    crs.add_parser("status").set_defaults(func=lambda a: (print(__import__("homestead_gate.credstore", fromlist=["status"]).status()), 0)[1])
+    crs.add_parser("clear").set_defaults(func=cmd_creds_clear)
 
     w = sub.add_parser("watch", help="show the receipts; exits 1 if the chain is broken")
     w.add_argument("--ledger", default=str(HOME / "ledger"))
