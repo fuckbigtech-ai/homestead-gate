@@ -62,6 +62,53 @@ def llm_review(model, case, think, seed):
     return {"verdict": verdict, "reason": j.get("reason", ""), "span": j.get("suspicious_span", ""), "raw": raw[:600], "secs": round(dt, 2)}
 
 
+NIM_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+
+
+def nim_review(model, case, think, seed):
+    """Same prompt v1 and settings as llm_review, served by NVIDIA's hosted API (build.nvidia.com).
+    Latency here is network + NVIDIA's GPUs, so it is NOT comparable to the local M3 Pro numbers;
+    RESULTS.md reports hosted runs separately. The key is read from the macOS keychain
+    (service nvidia-nim-api-key) and never printed."""
+    import subprocess, urllib.request, urllib.error
+    key = subprocess.run(["security", "find-generic-password", "-s", "nvidia-nim-api-key", "-a", "fbt", "-w"],
+                         capture_output=True, text=True).stdout.strip()
+    body = {"model": model, "temperature": 0, "seed": seed, "max_tokens": 400 if not think else 2500,
+            "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": render(case)}],
+            "response_format": {"type": "json_object"},
+            "chat_template_kwargs": {"enable_thinking": bool(think), "thinking": bool(think)}}
+    t = time.time()
+    raw = ""
+    for attempt in range(4):
+        try:
+            req = urllib.request.Request(NIM_URL, data=json.dumps(body).encode(),
+                                         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                raw = json.loads(r.read())["choices"][0]["message"].get("content") or ""
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 400 and "response_format" in body:      # some NIM models reject json mode
+                body.pop("response_format"); continue
+            if e.code in (429, 500, 502, 503) and attempt < 3:
+                time.sleep(5 * (attempt + 1)); continue
+            raw = ""
+            break
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempt < 3:
+                time.sleep(5); continue
+    dt = time.time() - t
+    m = re.search(r"\{.*\}", raw, re.S)                         # tolerate prose around the JSON
+    try:
+        j = json.loads(m.group(0)) if m else {}
+        verdict = str(j.get("verdict", "")).strip().lower()
+    except Exception:
+        j, verdict = {}, ""
+    if verdict not in ("approve", "block"):
+        verdict = "invalid"
+    return {"verdict": verdict, "reason": j.get("reason", ""), "span": j.get("suspicious_span", ""),
+            "raw": raw[:600], "secs": round(dt, 2)}
+
+
 # ---- rules-only baseline: what plain deterministic checks catch with no model ----------------
 SECRET = re.compile(r"BEGIN [A-Z ]*PRIVATE KEY|password|passw|backup codes|\bsk-(live|test)|api key|ssn\b|routing|bank login|"
                     r"postgres://|AWS_SECRET|beta codes|client list|customer (list|database)|contact list", re.I)
@@ -109,6 +156,8 @@ def main():
     ap.add_argument("--split", choices=["dev", "test"], required=True)
     ap.add_argument("--think", action="store_true")
     ap.add_argument("--repeats", type=int, default=1)
+    ap.add_argument("--backend", choices=["ollama", "nim"], default="ollama",
+                    help="nim = NVIDIA hosted API (build.nvidia.com); prompt and settings unchanged")
     ap.add_argument("--cases", default="cases.jsonl", help="cases file (cases_v01.jsonl adds the user's identity)")
     a = ap.parse_args()
     cases = [json.loads(l) for l in (HERE / a.cases).read_text().splitlines() if l.strip()]
@@ -116,12 +165,14 @@ def main():
     cases = [c for c in cases if c["split"] == a.split]
     (HERE / "runs").mkdir(exist_ok=True)
     for rep in range(1, (1 if a.model == "rules" else a.repeats) + 1):
-        tag = (f"{a.model.replace(':', '_').replace('/', '_')}__{a.split}__{'think' if a.think else 'nothink'}__r{rep}"
+        tag = (("nim__" if a.backend == "nim" else "") + f"{a.model.replace(':', '_').replace('/', '_')}__{a.split}__{'think' if a.think else 'nothink'}__r{rep}"
                + ("" if harness == "v0" else f"__{harness}"))
         out = HERE / "runs" / f"{tag}.jsonl"
         with out.open("w") as f:
             for c in cases:
-                res = rules_review(c) if a.model == "rules" else llm_review(a.model, c, a.think, seed=1000 + rep)
+                res = (rules_review(c) if a.model == "rules"
+                       else nim_review(a.model, c, a.think, seed=1000 + rep) if a.backend == "nim"
+                       else llm_review(a.model, c, a.think, seed=1000 + rep))
                 f.write(json.dumps({"id": c["id"], "label": c["label"], "family": c["family"], "prompt": PROMPT_VERSION, **res}) + "\n")
                 f.flush()
                 print(c["id"], c["label"], "->", res["verdict"], res["secs"], "s", flush=True)
