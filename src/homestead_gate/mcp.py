@@ -36,8 +36,10 @@ _READ = {
 }
 TOOLS = [
     {"name": "gate_send_email",
-     "description": ("Send an email. The only way to send email. A local model reviews it and a human "
-                     "approves it before it goes; the call waits for that decision and returns it."),
+     "description": ("Send an email. The only way to send email. The user's policy decides first: mail to "
+                     "the user's own address can pass automatically, and some sends are refused outright. "
+                     "Everything else is reviewed by a local model and approved or denied by the user. "
+                     "The call waits for that decision and returns it."),
      "inputSchema": {"type": "object", "additionalProperties": False, "required": ["to", "subject", "body"],
                      "properties": {"to": {"type": "string"}, "subject": {"type": "string"},
                                     "body": {"type": "string"}, "read": _READ}}},
