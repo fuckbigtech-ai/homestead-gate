@@ -32,6 +32,10 @@ class Policy:
     chain_id: int = SEPOLIA
     max_value_eth: float = 0.05
     max_calldata_bytes: int = 256
+    # Vitalik, "My self-sovereign / local / private / secure LLM setup" (2026-04-02): autonomous wallet
+    # spending capped at about $100/day; anything above, or any tx carrying calldata, needs a human.
+    # 0.035 ETH is ~$100 at ~$2.7k/ETH (2026-09-30). Set it in ETH; the gate never fetches a price.
+    daily_auto_value_eth: float = 0.035
     max_actions_per_hour: int = 20
     model: str = "qwen3.5:9b"
     ollama_url: str = "http://127.0.0.1:11434"
@@ -40,6 +44,7 @@ class Policy:
     approval_timeout_s: float = 300
     _recent: deque = field(default_factory=deque, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _auto_spent: deque = field(default_factory=deque, repr=False)   # (time, eth) auto-approved in 24h
 
     @classmethod
     def load(cls, path: str | Path) -> "Policy":
@@ -52,6 +57,7 @@ class Policy:
             chain_id=int(v.get("chain_id", SEPOLIA)),
             max_value_eth=float(v.get("max_value_eth", 0.05)),
             max_calldata_bytes=int(v.get("max_calldata_bytes", 256)),
+            daily_auto_value_eth=float(v.get("daily_auto_value_eth", 0.035)),
             max_actions_per_hour=int(lim.get("max_actions_per_hour", 20)),
             model=rv.get("model", "qwen3.5:9b"), ollama_url=rv.get("ollama_url", "http://127.0.0.1:11434"),
             review_timeout_s=float(rv.get("timeout_s", 120)),
@@ -87,6 +93,34 @@ class Policy:
         to = (action.get("to") or "").lower()
         pool = self.email_allow if action.get("type") == "email" else self.evm_allow
         return to in {a.lower() for a in pool}
+
+    def auto_spent_today(self, now: float | None = None) -> float:
+        now = time.time() if now is None else now
+        with self._lock:
+            while self._auto_spent and now - self._auto_spent[0][0] > 86400:
+                self._auto_spent.popleft()
+            return sum(v for _, v in self._auto_spent)
+
+    def may_auto(self, action: dict, now: float | None = None) -> tuple[bool, str]:
+        """Whether an allowlisted action the model approved may go without a human (the 2-of-2's
+        policy half standing in for the human). Wallet rules follow Vitalik's April 2026 setup."""
+        if action.get("type") != "wallet_tx":
+            return True, "allowlisted and the model approved"
+        data = str(action.get("data") or "").removeprefix("0x")
+        if data:
+            return False, "carries calldata, which always needs a human"
+        value = float(action.get("value_eth", 0) or 0)
+        spent = self.auto_spent_today(now)
+        if spent + value > self.daily_auto_value_eth:
+            return False, (f"would take autonomous spending to {spent + value:g} ETH today, "
+                           f"over the {self.daily_auto_value_eth:g} ETH daily limit")
+        return True, "allowlisted, the model approved, within the daily autonomous limit"
+
+    def record_auto(self, action: dict, now: float | None = None) -> None:
+        if action.get("type") == "wallet_tx":
+            with self._lock:
+                self._auto_spent.append((time.time() if now is None else now,
+                                         float(action.get("value_eth", 0) or 0)))
 
     def check(self, action: dict, now: float | None = None) -> tuple[str, str]:
         """Return (outcome, reason). Counts the action against the hourly cap."""

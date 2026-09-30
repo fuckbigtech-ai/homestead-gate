@@ -12,6 +12,7 @@ allow = ["accountant@example.com"]    # allowlisted: auto-approved only if the l
 chain_id = 11155111        # Sepolia. v1 refuses any other chain.
 max_value_eth = 0.05       # over this is denied outright
 max_calldata_bytes = 256   # calldata is a covert channel out; cap it
+daily_auto_value_eth = 0.035  # ~$100/day spent without asking you (Vitalik's rule); calldata always asks
 allow = []
 
 [limits]

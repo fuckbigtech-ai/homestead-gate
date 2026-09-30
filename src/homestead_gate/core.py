@@ -107,8 +107,11 @@ class Gate:
             # The model's reason is kept out: it can quote the body, and the body stays out.
             pre("gate.review", f"llm:{verdict.verdict}", model=verdict.model,
                 verdict=verdict.verdict, secs=verdict.secs)
-            if not verdict.flagged and self.policy.is_allowlisted(action):
-                decided_by, decision, reason = "policy", "approve", "allowlisted and the model approved"
+            auto_ok, auto_why = (self.policy.may_auto(action) if not verdict.flagged
+                                 and self.policy.is_allowlisted(action) else (False, ""))
+            if auto_ok:
+                decided_by, decision, reason = "policy", "approve", auto_why
+                self.policy.record_auto(action)
             else:
                 h = self.approver.ask(rid=rid, action=action, flagged=verdict.flagged,
                                       review_reason=verdict.reason, span=verdict.span)

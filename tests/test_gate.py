@@ -277,3 +277,21 @@ def test_policy_version_recorded_and_changes_with_rules(tmp_path):
     pv = records(tmp_path)[0]["meta"]["policy_version"]
     assert pv == g.policy.version and len(pv) == 16
     assert Policy(user_email=ME, max_value_eth=1).version != Policy(user_email=ME).version
+
+
+# ---- Vitalik's April 2026 wallet rules ----------------------------------------------------
+
+POOL = "0x" + "2" * 40
+
+
+def test_autonomous_wallet_spend_capped_per_day(tmp_path):
+    g, _ = make_gate(tmp_path, answers=("n",), evm_allow=[POOL], daily_auto_value_eth=0.035)
+    assert g.submit({"action": tx(to=POOL, value=0.02)})["status"] == "executed"   # auto, within limit
+    r = g.submit({"action": tx(to=POOL, value=0.02)})                               # would reach 0.04
+    assert r["status"] == "denied" and r["by"] == "human:terminal"
+
+
+def test_calldata_always_needs_a_human(tmp_path):
+    g, _ = make_gate(tmp_path, answers=("n",), evm_allow=[POOL])
+    r = g.submit({"action": tx(to=POOL, value=0, data="0xa9059cbb" + "00" * 64)})
+    assert r["status"] == "denied" and r["by"] == "human:terminal"
