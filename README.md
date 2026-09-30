@@ -103,8 +103,9 @@ runs the agent unconfined. The design:
   start programs outside the sandbox, like `open` on macOS), gpg-agent and ssh-agent. Any other
   unix socket that is live at launch is covered with an empty file. The agent can write only
   to the current directory, `$TMPDIR` and paths you pass with `--allow-write`.
-- **secrets:** the same credential stores as on macOS, plus `~/.local/share/keyrings`, are
-  covered with empty read-only mounts.
+- **secrets:** the same credential stores as on macOS, plus `~/.local/share/keyrings`,
+  `~/.config/hub` and cargo's credentials, are covered with empty read-only mounts. A store
+  that is a symlink (dotfile managers do this) is covered where it really lives.
 - **the gate itself, and places that run code later:** read-only, bound again after the
   writable mounts. This covers the gate's state and code, this repo's `.git/hooks` and
   `.git/config`, shell startup files, `~/bin`, `~/.local/bin`, git config and Claude Code

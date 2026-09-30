@@ -1,4 +1,4 @@
-"""`homestead-gate run -- <agent>`: make the gate the agent's only way out (macOS).
+"""`homestead-gate run -- <agent>`: make the gate the agent's only way out (macOS, Linux).
 
 The gate only means something if the agent cannot go around it. So the agent runs under
 the macOS sandbox (sandbox-exec) with a profile generated here:
@@ -230,9 +230,10 @@ def bwrap_args(cmd: list[str], *, home: Path, gate_home: Path, ledger: Path, cwd
     for rel in SECRET_READ + LINUX_SECRET_READ + list(extra_secret):
         p = Path(rel).expanduser()
         p = p if p.is_absolute() else home / rel
+        p = Path(os.path.realpath(p))    # ~/.ssh -> ~/dotfiles/ssh: cover the real directory
         if not visible(p):
             continue
-        if p.is_dir() and not p.is_symlink():
+        if p.is_dir():
             a += ["--tmpfs", str(p), "--remount-ro", str(p)]
         else:
             a += ["--ro-bind", str(empty), str(p)]

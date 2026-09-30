@@ -373,3 +373,50 @@ def test_linux_cannot_patch_gate_code_even_from_its_repo(tmp_path):
             " print(type(e).__name__)")
     _ok(_lx(tmp_path, code, cwd=repo), "OSError")
     assert open(target).read() == before
+
+
+@linux
+def test_linux_masks_symlinked_secret_dir(tmp_path):
+    home, _, _ = _layout(tmp_path)
+    import shutil as sh
+    sh.rmtree(home / ".ssh")
+    (home / "dotfiles" / "ssh").mkdir(parents=True)
+    (home / "dotfiles" / "ssh" / "id_ed25519").write_text("KEY")
+    (home / ".ssh").symlink_to(home / "dotfiles" / "ssh")
+    for p in (home / ".ssh" / "id_ed25519", home / "dotfiles" / "ssh" / "id_ed25519"):
+        code = (f"try:\n print(repr(open({str(p)!r}).read()))\nexcept OSError as e:\n"
+                " print(type(e).__name__)")
+        _ok(_lx(tmp_path, code), "FileNotFoundError")
+
+
+@linux
+def test_linux_blocks_services_that_act_outside(tmp_path):
+    """The Linux counterpart of the macOS lsopen / Apple Events test: the session bus and
+    systemd --user can start programs outside the sandbox, docker.sock is root. Plus an
+    abstract socket, which some D-Bus setups use and which lives in the network namespace."""
+    _layout(tmp_path)
+    uid = os.getuid()
+    targets = []
+    for p in (f"/run/user/{uid}/bus", f"/run/user/{uid}/systemd/private", "/run/docker.sock"):
+        c = socket.socket(socket.AF_UNIX)
+        try:
+            c.connect(p)            # control: only test the ones the host itself can reach
+            targets.append(p)
+        except OSError:
+            pass
+        finally:
+            c.close()
+    abstract = f"\0hg-{os.getpid()}"
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind(abstract)
+    srv.listen(1)
+    targets.append(abstract)
+    try:
+        for p in targets:
+            code = (f"import socket\ns=socket.socket(socket.AF_UNIX)\ntry:\n s.connect({p!r}); print('open')\n"
+                    "except OSError as e:\n print(type(e).__name__)")
+            r = _lx(tmp_path, code)
+            _ok(r)
+            assert r.stdout.strip() != "open", p
+    finally:
+        srv.close()
