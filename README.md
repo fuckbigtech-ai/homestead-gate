@@ -63,12 +63,20 @@ are prepared for Sepolia only, unsigned. The gate holds no keys.
 homestead-gate run --allow-host api.anthropic.com --allow-read ~/Library/Keychains -- claude
 ```
 
-The agent runs in the macOS sandbox. It can reach the gate, the local model and the hosts you
-allow (through a small proxy on your machine), and nothing else: no direct internet, no ssh-agent,
-no Docker socket. It can't read `~/.ssh`, cloud CLI credentials, `.env` files or registry tokens,
-it can't write the gate's policy or receipts, and it can't edit your shell startup files or
-LaunchAgents. Secret-looking environment variables are dropped unless you pass `--pass-env`.
-Every blocked connection is written to the receipts.
+The agent runs in the macOS sandbox, and the profile blocks:
+
+- **network:** everything except the gate, the local model and the hosts you allow (through a
+  small proxy on your machine). No direct internet, no DNS, no ssh-agent or Docker socket.
+- **secrets:** reading `~/.ssh`, cloud CLI credentials, `.env` files, registry tokens and git
+  credentials. Secret-looking environment variables are dropped unless you pass `--pass-env`.
+- **the gate itself:** writing its policy, receipts or its own code.
+- **known places that run code later:** shell startup files, LaunchAgents, `~/bin`,
+  `~/.local/bin`, git config and this repo's `.git/hooks`, Claude Code's settings and hooks.
+- **system services that act outside the sandbox:** opening apps or URLs (`open`) and Apple
+  Events (for example telling Mail to send).
+
+Every blocked connection is written to the receipts. The file rules are a list of known places
+on top of "allow everything else", so they stop what they name, not everything.
 
 Claude Code keeps its login in the macOS keychain, hence `--allow-read ~/Library/Keychains`.
 That also lets the agent ask the keychain for other items; macOS prompts you for most of them,
@@ -87,6 +95,11 @@ but read the prompt before you click. Linux (bubblewrap) is next.
 - **An agent that hides what it read.** The model sees what the agent reports reading. A hijacked
   agent can leave the injection out, and then the model judges the action against your task alone.
   Your task comes from you when you start the gate, never from the agent.
+- **Anything sent to an allowed host.** `api.anthropic.com` is a way out too, and a host on a
+  shared CDN can front for other sites on the same CDN. Allow as few hosts as you can.
+- **Places the file rules don't name.** Claude Code rewrites `~/.claude.json` constantly, so it
+  can't be locked, and it can register new MCP servers that start outside the sandbox next time.
+  Check `claude mcp list` if something looks off.
 - **A rebuilt ledger.** Someone with your files can rewrite the whole chain consistently. Run
   `hsm checkpoint` to sign it, and keep the signature somewhere they can't reach.
 - **Attacks GateBench doesn't cover.** 30 attacks, one step each, written by us. See the bench limits.
