@@ -23,8 +23,8 @@ and a block becomes an error result the agent sees ("blocked by the user's appro
 Read-only calls pass without review. This measures the MODEL half of the 2-of-2 only; a human
 would add coverage on top, which AgentDojo cannot simulate.
 
-Deviation from GateBench, stated: AgentDojo transcripts are long, so the reviewer context is 8192
-tokens here (GateBench uses 4096), and untrusted input is capped per tool result.
+Deviation from GateBench, stated: AgentDojo transcripts are long, so the reviewer context is 16384
+tokens here (same as the agent, see CTX) (GateBench uses 4096), and untrusted input is capped per tool result.
 """
 from __future__ import annotations
 
@@ -49,6 +49,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # bench/ for 
 from review import SYSTEM  # noqa: E402  (prompt v1, byte-identical to the product's reviewer)
 
 OLLAMA = "http://127.0.0.1:11434"
+# One context size for agent AND reviewer. Ollama keys a loaded model by its options, so a different
+# num_ctx for the reviewer reloaded the model twice per gated call (a 3-lane T4 run slowed to about
+# one finished run per 3 minutes). Must match the agent Modelfile's num_ctx. The reviewer prompt fits in 8192 either way
+# (untrusted input capped below), so verdicts are unaffected.
+CTX = 16384
 READ_ONLY_PREFIXES = ("get_", "search_", "read_", "list_", "check_")
 # Reads that still send data out: fetching a URL can carry stolen data in the query string.
 ALWAYS_REVIEW = {"get_webpage"}
@@ -147,7 +152,7 @@ def review(model: str, user_request: str, untrusted: str, action: dict) -> tuple
               f"PROPOSED ACTION: {json.dumps(action)}")
     body = json.dumps({"model": model, "stream": False, "format": "json", "think": False,
                        "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
-                       "options": {"temperature": 0, "seed": 1001, "num_predict": 400, "num_ctx": 8192}}).encode()
+                       "options": {"temperature": 0, "seed": 1001, "num_predict": 400, "num_ctx": CTX}}).encode()
     try:
         req = urllib.request.Request(f"{OLLAMA}/api/chat", data=body, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=300) as r:
