@@ -21,4 +21,5 @@ packages = ["src/homestead_gate"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
 markers = ["model: loads a real local model (opt in with HG_MODEL_TESTS=1)"]
