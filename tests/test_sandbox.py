@@ -105,3 +105,38 @@ def test_sandbox_hides_secrets_and_protects_gate(tmp_path):
     write = _sandboxed(tmp_path, f"open({str(tmp_path / 'gate' / 'policy.toml')!r}, 'w').write('x')", [6000])
     assert read.returncode != 0 and env.returncode != 0 and write.returncode != 0
     assert ok.returncode == 0 and "fine" in ok.stdout
+
+
+@darwin
+def test_sandbox_cannot_patch_gate_code_or_escape_via_services(tmp_path):
+    import homestead_gate.approval as ap
+    target = ap.__file__
+    before = open(target).read()
+    r = _sandboxed(tmp_path, f"open({target!r}, 'a').write('# pwned')", [6000])
+    assert r.returncode != 0 and open(target).read() == before
+    lsopen = subprocess.run(["sandbox-exec", "-f", _write_profile(tmp_path), "/usr/bin/open", "-g", "-j",
+                             "https://example.invalid/?probe"], capture_output=True, text=True, timeout=30)
+    assert lsopen.returncode != 0
+
+
+@darwin
+def test_sandbox_blocks_unix_sockets_and_dns(tmp_path):
+    import os
+    sock_path = f"/tmp/hg-{os.getpid()}.sock"
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind(sock_path)
+    srv.listen(1)
+    try:
+        r = _sandboxed(tmp_path, f"import socket; s=socket.socket(socket.AF_UNIX); s.connect({sock_path!r})", [6000])
+        assert r.returncode != 0
+    finally:
+        srv.close()
+        os.unlink(sock_path)
+    dns = _sandboxed(tmp_path, "import socket; socket.getaddrinfo('example.com', 443)", [6000])
+    assert dns.returncode != 0
+
+
+def _write_profile(tmp_path):
+    sb = tmp_path / "q.sb"
+    sb.write_text(profile(home=tmp_path, gate_home=tmp_path / "gate", ledger=tmp_path / "gate" / "l", ports=[6000]))
+    return str(sb)

@@ -4,12 +4,15 @@ The gate only means something if the agent cannot go around it. So the agent run
 the macOS sandbox (sandbox-exec) with a profile generated here:
 
   network   outbound only to loopback: the gate, the local model, and the egress proxy.
-            No direct internet, no unix sockets (so no ssh-agent, no docker.sock).
+            No direct internet, no DNS, no unix sockets (so no ssh-agent, no docker.sock).
   secrets   credential stores are unreadable: ~/.ssh, cloud CLIs, keychains, .env files,
             package-registry tokens, git credentials.
-  the gate  the gate's policy, receipts and outbox are read-only to the agent, and shell
-            startup files and LaunchAgents cannot be written, so the agent cannot plant
-            something that runs later outside the sandbox.
+  the gate  the gate's policy, receipts, outbox and its own code are read-only to the agent.
+  later     known places that run code later outside the sandbox are read-only: shell
+            startup files, LaunchAgents, ~/bin and ~/.local/bin, git config and this repo's
+            .git/hooks, Claude Code settings and hooks. A denylist, so known places only.
+  services  no LaunchServices (`open`) and no Apple Events, which would start things
+            outside the sandbox.
 
 Linux support (bubblewrap) is a later milestone. sandbox-exec is deprecated by Apple but
 still ships and is what Chrome and others use; if it ever disappears, `run` refuses to
@@ -29,7 +32,21 @@ SECRET_READ = [
     ".git-credentials", ".password-store", ".config/gh", ".config/gcloud", ".config/stripe",
     ".config/op", "Library/Keychains",
 ]
-NO_WRITE = [".zshrc", ".zprofile", ".bashrc", ".bash_profile", ".profile", "Library/LaunchAgents"]
+# Places that run code LATER, outside the sandbox. A denylist on top of (allow default), so
+# it covers the known ones, not every possible one; the README says so.
+NO_WRITE = [".zshrc", ".zprofile", ".zshenv", ".bashrc", ".bash_profile", ".profile", "Library/LaunchAgents",
+            ".local/bin", "bin", ".gitconfig", ".config/git",
+            ".claude/settings.json", ".claude/settings.local.json", ".claude/hooks"]
+
+
+def own_code_paths() -> list[Path]:
+    """The gate's own code, found at runtime: patch approval.py and the next `up` approves
+    everything. Covers this package, homestead-memory, and the interpreter's environment."""
+    import homestead_memory
+    from . import __file__ as me
+    paths = {Path(me).resolve().parent, Path(homestead_memory.__file__).resolve().parent,
+             Path(sys.prefix).resolve()}
+    return sorted(paths)
 
 
 def _q(p: str | Path) -> str:
@@ -41,6 +58,10 @@ def profile(*, home: Path, gate_home: Path, ledger: Path, ports: list[int],
     lines = ["(version 1)", "(allow default)", "", ";; network: loopback only, and only these ports",
              "(deny network-outbound)"]
     lines += [f'(allow network-outbound (remote ip "localhost:{p}"))' for p in sorted(set(ports))]
+    # system services that would start something OUTSIDE the sandbox on the agent's behalf:
+    # LaunchServices (`open https://...?data` hands the URL to your unsandboxed browser) and
+    # Apple Events (`tell application "Mail" to send`, which would skip the gate entirely).
+    lines += ["", ";; no launching apps or URLs, no Apple Events", "(deny lsopen)", "(deny appleevent-send)"]
     lines += ["", ";; credential stores"]
     for rel in SECRET_READ + list(extra_secret):
         path = Path(rel).expanduser()
@@ -49,8 +70,10 @@ def profile(*, home: Path, gate_home: Path, ledger: Path, ports: list[int],
     lines.append('(deny file-read* (regex #"/\\.env$"))')
     lines.append('(deny file-read* (regex #"/\\.env\\.[^/]+$"))')
     lines += ["", ";; the gate's own state, and anything that runs later outside the sandbox"]
-    for p in {gate_home, ledger}:
+    for p in sorted({Path(gate_home), Path(ledger), *own_code_paths()}):
         lines.append(f"(deny file-write* (subpath {_q(p)}))")
+    for p in (Path.cwd() / ".git" / "hooks", Path.cwd() / ".git" / "config"):
+        lines.append(f"(deny file-write* (subpath {_q(p.resolve())}))")
     for rel in NO_WRITE:
         lines.append(f"(deny file-write* (subpath {_q(home / rel)}))")
     if allow_read:
