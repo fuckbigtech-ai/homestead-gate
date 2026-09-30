@@ -62,16 +62,24 @@ def llm_review(model, case, think, seed):
     return {"verdict": verdict, "reason": j.get("reason", ""), "span": j.get("suspicious_span", ""), "raw": raw[:600], "secs": round(dt, 2)}
 
 
-NIM_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+# OpenAI-compatible hosts: (chat completions URL, keychain service holding the key).
+HOSTS = {
+    "nim": ("https://integrate.api.nvidia.com/v1/chat/completions", "nvidia-nim-api-key"),
+    "groq": ("https://api.groq.com/openai/v1/chat/completions", "groq-api-key"),
+    "cerebras": ("https://api.cerebras.ai/v1/chat/completions", "cerebras-api-key"),
+    "google": ("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "google-ai-studio-key"),
+}
+NIM_URL = HOSTS["nim"][0]
 
 
-def nim_review(model, case, think, seed):
+def nim_review(model, case, think, seed, host="nim"):
     """Same prompt v1 and settings as llm_review, served by NVIDIA's hosted API (build.nvidia.com).
     Latency here is network + NVIDIA's GPUs, so it is NOT comparable to the local M3 Pro numbers;
     RESULTS.md reports hosted runs separately. The key is read from the macOS keychain
     (service nvidia-nim-api-key) and never printed."""
     import subprocess, urllib.request, urllib.error
-    key = subprocess.run(["security", "find-generic-password", "-s", "nvidia-nim-api-key", "-a", "fbt", "-w"],
+    url, service = HOSTS[host]
+    key = subprocess.run(["security", "find-generic-password", "-s", service, "-a", "fbt", "-w"],
                          capture_output=True, text=True).stdout.strip()
     body = {"model": model, "temperature": 0, "seed": seed, "max_tokens": 400 if not think else 2500,
             "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": render(case)}],
@@ -81,14 +89,19 @@ def nim_review(model, case, think, seed):
     raw = ""
     for attempt in range(4):
         try:
-            req = urllib.request.Request(NIM_URL, data=json.dumps(body).encode(),
-                                         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+            req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                                                  "User-Agent": "homestead-gate-bench/0.1"})
             with urllib.request.urlopen(req, timeout=120) as r:
                 raw = json.loads(r.read())["choices"][0]["message"].get("content") or ""
             break
         except urllib.error.HTTPError as e:
-            if e.code == 400 and "response_format" in body:      # some NIM models reject json mode
+            if e.code == 400 and "chat_template_kwargs" in body:  # hosts other than NIM reject it
+                body.pop("chat_template_kwargs"); continue
+            if e.code == 400 and "response_format" in body:      # some models reject json mode
                 body.pop("response_format"); continue
+            if e.code == 400 and "seed" in body:
+                body.pop("seed"); continue
             if e.code in (429, 500, 502, 503) and attempt < 3:
                 time.sleep(5 * (attempt + 1)); continue
             raw = ""
@@ -156,7 +169,7 @@ def main():
     ap.add_argument("--split", choices=["dev", "test"], required=True)
     ap.add_argument("--think", action="store_true")
     ap.add_argument("--repeats", type=int, default=1)
-    ap.add_argument("--backend", choices=["ollama", "nim"], default="ollama",
+    ap.add_argument("--backend", choices=["ollama", "nim", "groq", "cerebras", "google"], default="ollama",
                     help="nim = NVIDIA hosted API (build.nvidia.com); prompt and settings unchanged")
     ap.add_argument("--cases", default="cases.jsonl", help="cases file (cases_v01.jsonl adds the user's identity)")
     a = ap.parse_args()
@@ -165,13 +178,13 @@ def main():
     cases = [c for c in cases if c["split"] == a.split]
     (HERE / "runs").mkdir(exist_ok=True)
     for rep in range(1, (1 if a.model == "rules" else a.repeats) + 1):
-        tag = (("nim__" if a.backend == "nim" else "") + f"{a.model.replace(':', '_').replace('/', '_')}__{a.split}__{'think' if a.think else 'nothink'}__r{rep}"
+        tag = (("" if a.backend == "ollama" else f"{a.backend}__") + f"{a.model.replace(':', '_').replace('/', '_')}__{a.split}__{'think' if a.think else 'nothink'}__r{rep}"
                + ("" if harness == "v0" else f"__{harness}"))
         out = HERE / "runs" / f"{tag}.jsonl"
         with out.open("w") as f:
             for c in cases:
                 res = (rules_review(c) if a.model == "rules"
-                       else nim_review(a.model, c, a.think, seed=1000 + rep) if a.backend == "nim"
+                       else nim_review(a.model, c, a.think, seed=1000 + rep, host=a.backend) if a.backend != "ollama"
                        else llm_review(a.model, c, a.think, seed=1000 + rep))
                 f.write(json.dumps({"id": c["id"], "label": c["label"], "family": c["family"], "prompt": PROMPT_VERSION, **res}) + "\n")
                 f.flush()
