@@ -72,7 +72,7 @@ HOSTS = {
 NIM_URL = HOSTS["nim"][0]
 
 
-def nim_review(model, case, think, seed, host="nim"):
+def nim_review(model, case, think, seed, host="nim", max_tokens=None, effort=None):
     """Same prompt v1 and settings as llm_review, served by NVIDIA's hosted API (build.nvidia.com).
     Latency here is network + NVIDIA's GPUs, so it is NOT comparable to the local M3 Pro numbers;
     RESULTS.md reports hosted runs separately. The key is read from the macOS keychain
@@ -81,13 +81,16 @@ def nim_review(model, case, think, seed, host="nim"):
     url, service = HOSTS[host]
     key = subprocess.run(["security", "find-generic-password", "-s", service, "-a", "fbt", "-w"],
                          capture_output=True, text=True).stdout.strip()
-    body = {"model": model, "temperature": 0, "seed": seed, "max_tokens": 400 if not think else 2500,
+    body = {"model": model, "temperature": 0, "seed": seed,
+            "max_tokens": max_tokens or (400 if not think else 2500),
             "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": render(case)}],
             "response_format": {"type": "json_object"},
             "chat_template_kwargs": {"enable_thinking": bool(think), "thinking": bool(think)}}
+    if effort:          # models that always reason (gpt-oss): keep it short, give the answer room
+        body["reasoning_effort"] = effort
     t = time.time()
     raw = ""
-    for attempt in range(4):
+    for attempt in range(8):                   # free tiers rate-limit hard; be patient, never guess
         try:
             req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                          headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
@@ -102,12 +105,12 @@ def nim_review(model, case, think, seed, host="nim"):
                 body.pop("response_format"); continue
             if e.code == 400 and "seed" in body:
                 body.pop("seed"); continue
-            if e.code in (429, 500, 502, 503) and attempt < 3:
-                time.sleep(5 * (attempt + 1)); continue
+            if e.code in (429, 500, 502, 503) and attempt < 7:
+                time.sleep(min(60, 8 * (attempt + 1))); continue
             raw = ""
             break
         except (urllib.error.URLError, TimeoutError, OSError):
-            if attempt < 3:
+            if attempt < 7:
                 time.sleep(5); continue
     dt = time.time() - t
     m = re.search(r"\{.*\}", raw, re.S)                         # tolerate prose around the JSON
@@ -171,20 +174,23 @@ def main():
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--backend", choices=["ollama", "nim", "groq", "cerebras", "google"], default="ollama",
                     help="nim = NVIDIA hosted API (build.nvidia.com); prompt and settings unchanged")
+    ap.add_argument("--max-tokens", type=int, default=None, help="hosted: answer budget (reasoning models need more)")
+    ap.add_argument("--effort", default=None, help="hosted: reasoning_effort for always-reasoning models, e.g. low")
     ap.add_argument("--cases", default="cases.jsonl", help="cases file (cases_v01.jsonl adds the user's identity)")
     a = ap.parse_args()
     cases = [json.loads(l) for l in (HERE / a.cases).read_text().splitlines() if l.strip()]
-    harness = "v01" if a.cases != "cases.jsonl" else "v0"
+    harness = {"cases.jsonl": "v0", "cases_v01.jsonl": "v01"}.get(a.cases, Path(a.cases).stem.replace("cases_", ""))
     cases = [c for c in cases if c["split"] == a.split]
     (HERE / "runs").mkdir(exist_ok=True)
     for rep in range(1, (1 if a.model == "rules" else a.repeats) + 1):
-        tag = (("" if a.backend == "ollama" else f"{a.backend}__") + f"{a.model.replace(':', '_').replace('/', '_')}__{a.split}__{'think' if a.think else 'nothink'}__r{rep}"
+        tag = (("" if a.backend == "ollama" else f"{a.backend}__") + (f"effort-{a.effort}__" if a.effort else "") + f"{a.model.replace(':', '_').replace('/', '_')}__{a.split}__{'think' if a.think else 'nothink'}__r{rep}"
                + ("" if harness == "v0" else f"__{harness}"))
         out = HERE / "runs" / f"{tag}.jsonl"
         with out.open("w") as f:
             for c in cases:
                 res = (rules_review(c) if a.model == "rules"
-                       else nim_review(a.model, c, a.think, seed=1000 + rep, host=a.backend) if a.backend != "ollama"
+                       else nim_review(a.model, c, a.think, seed=1000 + rep, host=a.backend,
+                                    max_tokens=a.max_tokens, effort=a.effort) if a.backend != "ollama"
                        else llm_review(a.model, c, a.think, seed=1000 + rep))
                 f.write(json.dumps({"id": c["id"], "label": c["label"], "family": c["family"], "prompt": PROMPT_VERSION, **res}) + "\n")
                 f.flush()
