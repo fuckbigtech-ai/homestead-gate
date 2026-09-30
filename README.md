@@ -22,7 +22,7 @@ pip install -e .                         # PyPI release comes later
 homestead-gate up                        # set up, then run the gate on 127.0.0.1:6000
 homestead-gate doctor                    # one-screen health check
 homestead-gate demo                      # a hijacked agent vs the gate, in a throwaway ledger
-homestead-gate watch                     # the receipts; exits 1 if anyone edited them
+homestead-gate watch                     # the receipts; exits 1 if a record was edited
 ```
 
 `homestead-gate up` checks your machine, then picks a reviewer that fits it:
@@ -103,7 +103,8 @@ The agent runs in the macOS sandbox, and the profile blocks:
 - **system services that act outside the sandbox:** opening apps or URLs (`open`) and Apple
   Events (for example telling Mail to send).
 
-Every blocked connection is written to the receipts. The file rules are a list of known places
+Blocked connections are written to the receipts: the first attempt to each host, then at most one
+per host per minute, because agents retry constantly. The file rules are a list of known places
 on top of "allow everything else", so they stop what they name, not everything.
 
 Claude Code keeps its login in the macOS keychain, hence `--allow-read ~/Library/Keychains`.
@@ -214,8 +215,10 @@ compromised gate process has the password. Linux needs libsecret; there is no pl
 - **Places the file rules don't name.** Claude Code rewrites `~/.claude.json` constantly, so it
   can't be locked, and it can register new MCP servers that start outside the sandbox next time.
   Check `claude mcp list` if something looks off.
-- **A rebuilt ledger.** Someone with your files can rewrite the whole chain consistently. Run
-  `hsm checkpoint` to sign it, and keep the signature somewhere they can't reach.
+- **A rebuilt or shortened ledger.** The chain catches an edited record, but someone with your files
+  can rewrite the whole chain consistently, or delete the newest records, and `watch` still exits 0.
+  Run `hsm checkpoint ~/.homestead-gate/ledger` to sign its current state, and keep the signature
+  somewhere they can't reach. (Without the path, `hsm checkpoint` signs a different directory.)
 - **Attacks GateBench doesn't cover.** 30 attacks, one step each, written by us. See the bench limits.
 
 MIT licensed.
