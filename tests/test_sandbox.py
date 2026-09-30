@@ -205,6 +205,17 @@ def test_bwrap_args_shape(tmp_path):
     assert a[-1] == "agent" and "6000,11434" in a
 
 
+def test_bwrap_hides_gate_smtp_settings(tmp_path):
+    home, proj, gate = _layout(tmp_path)
+    gate.mkdir(parents=True, exist_ok=True)
+    (gate / "smtp.toml").write_text('host = "h"\n')
+    a = " ".join(sbx.bwrap_args(["agent"], home=home, gate_home=gate, ledger=gate / "l", cwd=proj,
+                                sock_dir=tmp_path / "s", ports=[6000]))
+    assert f"--ro-bind {tmp_path / 's' / 'empty'} {gate / 'smtp.toml'}" in a
+    # covered after the gate directory is re-bound read-only, or the re-bind would expose it again
+    assert a.index(f"--ro-bind {gate} {gate}") < a.index(f"{gate / 'smtp.toml'}")
+
+
 def test_linux_run_fails_closed_without_bwrap(monkeypatch, tmp_path):
     monkeypatch.setattr(sbx.sys, "platform", "linux")
     monkeypatch.setattr(sbx.shutil, "which", lambda _: None)

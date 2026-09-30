@@ -239,7 +239,8 @@ def bwrap_args(cmd: list[str], *, home: Path, gate_home: Path, ledger: Path, cwd
             a += ["--tmpfs", str(p), "--remount-ro", str(p)]
         else:
             a += ["--ro-bind", str(empty), str(p)]
-    for p in list(env_files) + list(sockets):
+    gate_smtp = Path(gate_home) / "smtp.toml"   # the gate's own mail settings (host, user)
+    for p in list(env_files) + list(sockets) + [gate_smtp]:
         if visible(p) and not p.is_dir():
             a += ["--ro-bind", str(empty), str(p)]
     for p in allow_read:
