@@ -161,8 +161,10 @@ def cmd_demo(a) -> int:
     # spending capped at about $100/day; anything above it, or carrying calldata, needs the human.
     contractor, registry = "0x" + "2" * 40, "0x" + "3" * 40
     policy.evm_allow = [contractor, registry]
-    task_b = (f"pay my contractor {contractor} 0.02 ETH for each of today's two invoices, "
-              f"and register my name on the registry contract {registry}")
+    # One task per session. Prompt v1 judges each action against the WHOLE request, so a multi-part
+    # task ("pay X and register Y") gets its first step blocked as incomplete. That is a known
+    # limit (README), measured separately, not something the demo hides.
+    task_b = f"pay my contractor {contractor} 0.02 ETH for today's invoice"
     wallet = Gate(policy=policy, reviewer=reviewer, approver=approver, ledger_dir=root / "ledger",
                   task=task_b, session="demo", outbox=root / "outbox")
     print(f"task (from the human): {task_b}")
@@ -170,11 +172,20 @@ def cmd_demo(a) -> int:
     print("3) first invoice, 0.02 ETH to an allowlisted contractor: inside the daily limit")
     r3 = wallet.submit({"action": {"type": "wallet_tx", "chain_id": 11155111, "to": contractor, "value_eth": 0.02}})
     print(f"   -> {r3['status']} ({r3.get('reason') or r3.get('by')})\n")
-    print("4) second invoice, 0.02 ETH: would take today's autonomous spending past the limit")
-    r4 = wallet.submit({"action": {"type": "wallet_tx", "chain_id": 11155111, "to": contractor, "value_eth": 0.02}})
+    print("4) later, a second request: pay tomorrow's 0.02 ETH invoice early. the model is fine with it,")
+    print("   but it would take today's autonomous spending past the limit, so it comes to you")
+    task_b2 = f"pay my contractor {contractor} 0.02 ETH for tomorrow's invoice now"
+    wallet2 = Gate(policy=policy, reviewer=reviewer, approver=approver, ledger_dir=root / "ledger",
+                   task=task_b2, session="demo", outbox=root / "outbox")
+    print(f"task (from the human): {task_b2}")
+    r4 = wallet2.submit({"action": {"type": "wallet_tx", "chain_id": 11155111, "to": contractor, "value_eth": 0.02}})
     print(f"   -> {r4['status']} (decided by {r4.get('by')})\n")
-    print("5) the registry call carries calldata: a human always sees it")
-    r5 = wallet.submit({"action": {"type": "wallet_tx", "chain_id": 11155111, "to": registry, "value_eth": 0,
+    print("5) a new task: register my name on the registry. the call carries calldata, so a human always sees it")
+    task_c = f"register my name on the registry contract {registry}"
+    registry_gate = Gate(policy=policy, reviewer=reviewer, approver=approver, ledger_dir=root / "ledger",
+                         task=task_c, session="demo", outbox=root / "outbox")
+    print(f"task (from the human): {task_c}")
+    r5 = registry_gate.submit({"action": {"type": "wallet_tx", "chain_id": 11155111, "to": registry, "value_eth": 0,
                                    "data": "0xf14fcbc8" + "00" * 32}})
     print(f"   -> {r5['status']} (decided by {r5.get('by')})\n")
 

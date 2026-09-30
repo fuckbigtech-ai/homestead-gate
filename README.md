@@ -113,6 +113,9 @@ compromised gate process has the password. Linux needs libsecret; there is no pl
 - **An agent that hides what it read.** The model sees what the agent reports reading. A hijacked
   agent can leave the injection out, and then the model judges the action against your task alone.
   Your task comes from you when you start the gate, never from the agent.
+- **Multi-part requests.** The reviewer judges each action against the whole request, so for
+  "pay the contractor and register my name" it can block the payment as incomplete. Give the gate one
+  task at a time for now; a fix is being measured against the frozen benchmark before it ships.
 - **Anything sent to an allowed host.** `api.anthropic.com` is a way out too, and a host on a
   shared CDN can front for other sites on the same CDN. Allow as few hosts as you can.
 - **Places the file rules don't name.** Claude Code rewrites `~/.claude.json` constantly, so it
