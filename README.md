@@ -19,6 +19,7 @@ Found an attack that gets through? Open a pull request with a new case. That's t
 
 ```bash
 pip install -e .                         # PyPI release comes later
+ollama pull qwen3.5:9b                   # the reviewer GateBench measured (6.6GB)
 homestead-gate demo                      # a hijacked agent vs the gate, in a throwaway ledger
 homestead-gate up --task "email me a summary of today's inbox"   # gate on 127.0.0.1:6000
 homestead-gate watch                     # the receipts; exits 1 if anyone edited them

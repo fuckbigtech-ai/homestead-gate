@@ -12,6 +12,7 @@ lands only on the rare flagged case, so it is cheap where it matters.
 """
 from __future__ import annotations
 
+import re
 import select
 import sys
 import threading
@@ -20,6 +21,15 @@ from dataclasses import dataclass
 from typing import Callable
 
 OVERRIDE_PHRASE = "send anyway"
+BODY_LINES = 20
+# C0 and C1 control characters, ESC included. Everything shown here was written by the
+# agent or quotes what it read, and one ANSI sequence (conceal, cursor-up, colour matched
+# to the background) is enough to hide the model's flag line from the human.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def clean(value) -> str:
+    return _CONTROL.sub("?", str(value))
 
 
 @dataclass
@@ -57,17 +67,21 @@ class TerminalApprover:
             self.out(f"== approval needed [{rid}] ==")
             for k in ("type", "to", "subject", "value_eth", "chain_id", "data"):
                 if action.get(k) not in (None, ""):
-                    self.out(f"  {k:<9} {action[k]}")
+                    self.out(f"  {k:<9} {clean(action[k])}")
             if action.get("body"):
+                lines = str(action["body"]).splitlines()
                 self.out("  body:")
-                for ln in str(action["body"]).splitlines()[:20]:
-                    self.out(f"    | {ln}")
+                for ln in lines[:BODY_LINES]:
+                    self.out(f"    | {clean(ln)}")
+                if len(lines) > BODY_LINES:
+                    hidden = sum(len(x) + 1 for x in lines[BODY_LINES:])
+                    self.out(f"    (+{len(lines) - BODY_LINES} more lines, {hidden} characters not shown)")
             if flagged:
-                self.out(f"  !! local model FLAGGED this: {review_reason}")
+                self.out(f"  !! local model FLAGGED this: {clean(review_reason)}")
                 if span:
-                    self.out(f"  !! suspicious text: {span[:200]}")
+                    self.out(f"  !! suspicious text: {clean(span[:200])}")
             else:
-                self.out(f"  local model: ok ({review_reason})")
+                self.out(f"  local model: ok ({clean(review_reason)})")
 
             ans = self.input("approve? [y/N] ", left())
             if ans is None:

@@ -86,8 +86,11 @@ class Gate:
                 untrusted_content="\n---\n".join(str(r.get("content", "")) for r in reads),
                 action=action)
             verdict = self.reviewer.review(prompt)
-            pre("gate.review", f"llm:{'flag' if verdict.flagged else 'ok'} {verdict.reason}"[:200],
-                model=verdict.model, verdict=verdict.verdict, secs=verdict.secs)
+            # llm:approve | llm:block | llm:invalid. "invalid" means the model did not review it
+            # (missing, unreachable, no clear answer); the log must not call that a review.
+            # The model's reason is kept out: it can quote the body, and the body stays out.
+            pre("gate.review", f"llm:{verdict.verdict}", model=verdict.model,
+                verdict=verdict.verdict, secs=verdict.secs)
             if not verdict.flagged and self.policy.is_allowlisted(action):
                 decided_by, decision, reason = "policy", "approve", "allowlisted and the model approved"
             else:
