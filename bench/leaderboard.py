@@ -45,13 +45,18 @@ def parse(name: str) -> dict:
         rest = rest[1:]
     else:
         effort = ""
+    prompt = "v1"
+    if name.endswith("__pv2"):
+        prompt, name = "v2 (candidate)", name[: -len("__pv2")]
     harness = "v0"
     if name.endswith("__v01"):
         harness = "v0.1"
     elif "v02_knowncontracts" in name:
         harness = "v0.2 known contracts"
+    elif "v03_multistep" in name:
+        harness = "v0.3 multi-step (benign only)"
     kind = "input classifier" if "inputclassifier" in name else "gate reviewer"
-    return {"host": host, "model": model, "harness": harness, "effort": effort, "kind": kind}
+    return {"host": host, "model": model, "harness": harness, "effort": effort, "kind": kind, "prompt": prompt}
 
 
 def rows():
@@ -59,17 +64,17 @@ def rows():
     for f in sorted(glob.glob(str(HERE / "runs" / "*__test__*.jsonl"))):
         stem = Path(f).stem
         meta = parse(stem)
-        key = (meta["host"], meta["model"], meta["harness"], meta["effort"], meta["kind"])
+        key = (meta["host"], meta["model"], meta["harness"], meta["effort"], meta["kind"], meta["prompt"])
         groups[key].append(summarize(load(f)))
     out = []
-    for (host, model, harness, effort, kind), ss in groups.items():
+    for (host, model, harness, effort, kind, prompt), ss in groups.items():
         caught = [s["caught"] for s in ss]; fb = [s["fblocked"] for s in ss]; inv = [s["invalid"] for s in ss]
         fmt = lambda v, n: f"{v[0]}/{n}" if len(set(v)) == 1 else f"{statistics.mean(v):.1f}/{n} (range {min(v)}-{max(v)})"
         note = next((v for k, v in HOST_NOTES.items() if k in (model or "")), "")
         if effort:
             note = (note + "; " if note else "") + f"reasoning_effort={effort.split('-',1)[1]}, 2000-token answer budget"
-        out.append({"host": host, "model": model, "harness": harness, "kind": kind, "repeats": len(ss),
-                    "attacks_caught": fmt(caught, ss[0]["n_mal"]), "legit_blocked": fmt(fb, ss[0]["n_ben"]),
+        out.append({"host": host, "model": model, "harness": harness, "kind": kind, "prompt": prompt, "repeats": len(ss),
+                    "attacks_caught": fmt(caught, ss[0]["n_mal"]) if ss[0]["n_mal"] else "n/a", "legit_blocked": fmt(fb, ss[0]["n_ben"]),
                     "invalid": sum(inv), "p50_s": round(statistics.median(s["p50"] for s in ss), 1), "note": note,
                     "_sort": (-statistics.mean(caught), statistics.mean(fb), sum(inv))})
     return sorted(out, key=lambda r: r["_sort"])
@@ -77,15 +82,17 @@ def rows():
 
 def md(rs) -> str:
     lines = []
-    for title, pick in (("Local (Apple M3 Pro, 18GB, Ollama)", lambda r: r["host"] == "local"),
-                        ("Hosted (free API tiers; latency not comparable)", lambda r: r["host"] != "local")):
+    main = lambda r: r["prompt"] == "v1" and "multi-step" not in r["harness"]
+    for title, pick in (("Local (Apple M3 Pro, 18GB, Ollama)", lambda r: r["host"] == "local" and main(r)),
+                        ("Hosted (free API tiers; latency not comparable)", lambda r: r["host"] != "local" and main(r)),
+                        ("Prompt v2 candidate and the multi-step family (not the shipped gate)", lambda r: not main(r))):
         sel = [r for r in rs if pick(r)]
         if not sel:
             continue
         lines += [f"### {title}", "", "| reviewer | harness | attacks caught | legit actions blocked | invalid | p50 s | repeats | note |",
                   "|---|---|---|---|---|---|---|---|"]
         for r in sel:
-            name = DISPLAY.get(r["model"], r["model"].replace("_", "/", 1) if r["host"] != "local" else r["model"]) + ("" if r["host"] == "local" else f" ({r['host']})") + (" [input classifier]" if r["kind"] != "gate reviewer" else "")
+            name = ("" if r["prompt"] == "v1" else f"[prompt {r['prompt']}] ") + DISPLAY.get(r["model"], r["model"].replace("_", "/", 1) if r["host"] != "local" else r["model"]) + ("" if r["host"] == "local" else f" ({r['host']})") + (" [input classifier]" if r["kind"] != "gate reviewer" else "")
             lines.append(f"| {name} | {r['harness']} | {r['attacks_caught']} | {r['legit_blocked']} | {r['invalid']} | "
                          f"{r['p50_s']} | {r['repeats']} | {r['note']} |")
         lines.append("")
