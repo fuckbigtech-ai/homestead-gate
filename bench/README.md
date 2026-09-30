@@ -36,7 +36,7 @@ or sends anything.
 ```bash
 python3 build_cases.py
 python3 review.py --model rules --split test                       # deterministic baseline, no model
-python3 review.py --model qwen3.5:4b-q4_K_M --split test --repeats 3
+python3 review.py --model qwen3.5:9b --split test --repeats 3   # any Ollama model tag
 python3 score.py runs/*__test__*.jsonl
 ```
 
