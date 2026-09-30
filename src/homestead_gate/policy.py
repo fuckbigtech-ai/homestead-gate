@@ -1,0 +1,105 @@
+"""Deterministic policy: runs before the model, and some of it cannot be overridden.
+
+Three outcomes per request:
+  deny   a hard rule the human set in advance (wrong chain, value over cap, too many
+         actions this hour). Nobody is asked; asking would invite approval fatigue on
+         exactly the requests the human already decided about.
+  auto   send-to-self. Harmless by construction, and keeping it silent is what keeps
+         prompts rare enough that the human still reads them.
+  review everything else: the local model reviews it, and the human decides unless the
+         destination is allowlisted AND the model approves.
+"""
+from __future__ import annotations
+
+import time
+import tomllib
+from collections import deque
+from dataclasses import dataclass, field
+from pathlib import Path
+
+SEPOLIA = 11155111
+
+
+@dataclass
+class Policy:
+    user_email: str = ""
+    user_wallet: str = ""
+    email_allow: list[str] = field(default_factory=list)
+    evm_allow: list[str] = field(default_factory=list)
+    chain_id: int = SEPOLIA
+    max_value_eth: float = 0.05
+    max_calldata_bytes: int = 256
+    max_actions_per_hour: int = 20
+    model: str = "qwen3.5:9b"
+    ollama_url: str = "http://127.0.0.1:11434"
+    review_timeout_s: float = 120
+    override_delay_s: float = 60
+    approval_timeout_s: float = 300
+    _recent: deque = field(default_factory=deque, repr=False)
+
+    @classmethod
+    def load(cls, path: str | Path) -> "Policy":
+        d = tomllib.loads(Path(path).read_text())
+        u, e, v = d.get("user", {}), d.get("email", {}), d.get("evm", {})
+        lim, rv, ap = d.get("limits", {}), d.get("review", {}), d.get("approval", {})
+        p = cls(
+            user_email=u.get("email", ""), user_wallet=u.get("wallet", ""),
+            email_allow=list(e.get("allow", [])), evm_allow=list(v.get("allow", [])),
+            chain_id=int(v.get("chain_id", SEPOLIA)),
+            max_value_eth=float(v.get("max_value_eth", 0.05)),
+            max_calldata_bytes=int(v.get("max_calldata_bytes", 256)),
+            max_actions_per_hour=int(lim.get("max_actions_per_hour", 20)),
+            model=rv.get("model", "qwen3.5:9b"), ollama_url=rv.get("ollama_url", "http://127.0.0.1:11434"),
+            review_timeout_s=float(rv.get("timeout_s", 120)),
+            override_delay_s=float(ap.get("override_delay_s", 60)),
+            approval_timeout_s=float(ap.get("timeout_s", 300)),
+        )
+        if p.chain_id != SEPOLIA:
+            # v1 is testnet only. Refusing to load beats a mainnet transaction nobody meant.
+            raise ValueError(f"chain_id {p.chain_id} refused: v1 supports Sepolia ({SEPOLIA}) only")
+        return p
+
+    @property
+    def identity(self) -> str:
+        bits = [self.user_email] + ([f"own wallet {self.user_wallet}"] if self.user_wallet else [])
+        return ", ".join(b for b in bits if b)
+
+    def known_contacts(self) -> list[str]:
+        return self.email_allow + self.evm_allow
+
+    def is_self(self, action: dict) -> bool:
+        to = (action.get("to") or "").lower()
+        return bool(to) and to in {self.user_email.lower(), self.user_wallet.lower()} - {""}
+
+    def is_allowlisted(self, action: dict) -> bool:
+        to = (action.get("to") or "").lower()
+        pool = self.email_allow if action.get("type") == "email" else self.evm_allow
+        return to in {a.lower() for a in pool}
+
+    def check(self, action: dict, now: float | None = None) -> tuple[str, str]:
+        """Return (outcome, reason). Counts the action against the hourly cap."""
+        now = time.time() if now is None else now
+        while self._recent and now - self._recent[0] > 3600:
+            self._recent.popleft()
+        if len(self._recent) >= self.max_actions_per_hour:
+            return "deny", f"over {self.max_actions_per_hour} actions this hour"
+        self._recent.append(now)
+
+        kind = action.get("type")
+        if kind not in ("email", "wallet_tx"):
+            return "deny", f"unsupported action type {kind!r}"
+        if not action.get("to"):
+            return "deny", "no recipient"
+        if kind == "wallet_tx":
+            if int(action.get("chain_id", SEPOLIA)) != self.chain_id:
+                return "deny", f"chain {action.get('chain_id')} is not the allowed chain {self.chain_id}"
+            if float(action.get("value_eth", 0) or 0) > self.max_value_eth:
+                return "deny", f"value over the {self.max_value_eth} ETH cap"
+            data = str(action.get("data") or "")
+            nbytes = max(0, len(data.removeprefix("0x")) // 2)
+            if nbytes > self.max_calldata_bytes:
+                # Vitalik's exfiltration point: calldata is a covert channel out.
+                return "deny", f"calldata {nbytes} bytes over the {self.max_calldata_bytes} byte cap"
+        if self.is_self(action):
+            return "auto", "send to self"
+        return "review", "not to self"

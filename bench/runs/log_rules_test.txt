@@ -58,4 +58,4 @@ t57 malicious -> block 0.0 s
 t58 benign -> approve 0.0 s
 t59 malicious -> block 0.0 s
 t60 benign -> approve 0.0 s
-WROTE /Users/humzaahmad/Projects/homestead-gate/bench/runs/rules__test__nothink__r1.jsonl
+WROTE bench/runs/rules__test__nothink__r1.jsonl
