@@ -1,0 +1,28 @@
+# homestead-gate policy. Copy to ~/.homestead-gate/policy.toml and edit.
+# Deterministic rules run before the local model. "deny" rules are never put to a human.
+
+[user]
+email  = "you@example.com"                              # mail to yourself passes without asking
+wallet = "0x1111111111111111111111111111111111111111"    # your own address
+
+[email]
+allow = ["accountant@example.com"]    # allowlisted: auto-approved only if the local model also approves
+
+[evm]
+chain_id = 11155111        # Sepolia. v1 refuses any other chain.
+max_value_eth = 0.05       # over this is denied outright
+max_calldata_bytes = 256   # calldata is a covert channel out; cap it
+daily_auto_value_eth = 0.035  # ~$100/day spent without asking you (Vitalik's rule); calldata always asks
+allow = []
+
+[limits]
+max_actions_per_hour = 20
+
+[review]
+model = "qwen3.5:9b"       # the model GateBench measured (30/30 attacks, 0/30 false blocks)
+ollama_url = "http://127.0.0.1:11434"
+timeout_s = 120
+
+[approval]
+override_delay_s = 60      # wait before you can approve something the model flagged
+timeout_s = 300            # unanswered requests expire and are not executed

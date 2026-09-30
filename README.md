@@ -19,10 +19,38 @@ Found an attack that gets through? Open a pull request with a new case. That's t
 
 ```bash
 pip install -e .                         # PyPI release comes later
-ollama pull qwen3.5:9b                   # the reviewer GateBench measured (6.6GB)
+homestead-gate up                        # set up, then run the gate on 127.0.0.1:6000
+homestead-gate doctor                    # one-screen health check
 homestead-gate demo                      # a hijacked agent vs the gate, in a throwaway ledger
-homestead-gate up --task "email me a summary of today's inbox"   # gate on 127.0.0.1:6000
 homestead-gate watch                     # the receipts; exits 1 if anyone edited them
+```
+
+`homestead-gate up` checks your machine, then picks a reviewer that fits it:
+
+- **`qwen3.5:9b`** (6.6GB) if it fits comfortably. This is the model GateBench measured: 30/30
+  attacks blocked, 0/30 false blocks, about 3.5s per review on an M3 Pro 18GB.
+- **`nemotron-3-nano:4b`** (2.8GB) on smaller machines, such as an 8GB Mac. It also blocked 30/30
+  attacks, but it false-blocked 3/30 legitimate requests (10%), so you get asked more often.
+- **Neither:** if even the 4B needs more memory than the machine can give a model (it needs about
+  4.1GB), `up` refuses to run. It also refuses a model from `--model` or an existing policy that
+  does not fit.
+
+If `~/.homestead-gate/policy.toml` does not exist, `up` asks for your email and wallet address.
+It then writes the policy from `policy.example.toml`.
+
+Next it checks that Ollama is installed and running. If the reviewer model is missing, `up`
+prints the exact `ollama pull` command and the download size. It downloads nothing unless you pass
+`--pull`. With `--pull`, the download goes through `model-load-guard` when that tool is on your
+PATH.
+
+`up` asks for the task. The reviewer trusts only this, and it comes from you, never from the agent.
+Then the gate starts.
+
+To run without prompts:
+
+```bash
+homestead-gate up --yes --email you@example.com --task "email me a summary of today's inbox"
+homestead-gate up --yes --email you@example.com --dry-run    # show what it would do; change nothing
 ```
 
 Give your agent the gate as its only way to send (Claude Code shown; any MCP client works):
