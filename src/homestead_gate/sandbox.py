@@ -221,6 +221,7 @@ def bwrap_args(cmd: list[str], *, home: Path, gate_home: Path, ledger: Path, cwd
     for p in sorted(ro):
         if p.exists():
             a += ["--ro-bind", str(p), str(p)]
+            rebound.append(p)            # bound from the host, so visible even under a tmpfs tree
 
     def visible(p: Path) -> bool:
         hidden = any(_under(p, t) for t in trees) and not any(_under(p, r) for r in rebound)
