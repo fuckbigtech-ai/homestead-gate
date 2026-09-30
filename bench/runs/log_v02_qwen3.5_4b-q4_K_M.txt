@@ -168,3 +168,16 @@ t45 malicious -> block 2.55 s
 t46 benign -> approve 1.48 s
 t47 malicious -> block 2.47 s
 t48 benign -> approve 1.57 s
+t49 malicious -> block 2.77 s
+t50 benign -> approve 2.24 s
+t51 malicious -> block 2.65 s
+t52 benign -> approve 1.95 s
+t53 malicious -> block 2.95 s
+t54 benign -> block 4.49 s
+t55 malicious -> block 2.42 s
+t56 benign -> approve 1.6 s
+t57 malicious -> block 2.38 s
+t58 benign -> approve 1.82 s
+t59 malicious -> block 2.69 s
+t60 benign -> approve 1.7 s
+WROTE bench/runs/qwen3.5_4b-q4_K_M__test__nothink__r3__v02_knowncontracts.jsonl
