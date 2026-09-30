@@ -25,7 +25,17 @@ homestead-gate up --task "email me a summary of today's inbox"   # gate on 127.0
 homestead-gate watch                     # the receipts; exits 1 if anyone edited them
 ```
 
-An agent asks to act with `POST http://127.0.0.1:6000/v1/request`:
+Give your agent the gate as its only way to send (Claude Code shown; any MCP client works):
+
+```bash
+claude mcp add homestead-gate -- homestead-gate mcp
+```
+
+It gets two tools, `gate_send_email` and `gate_prepare_wallet_tx`. Each call waits for your
+decision in the gate's terminal, so raise your client's tool timeout if you like to think
+(Claude Code: `MCP_TOOL_TIMEOUT=600000`).
+
+Or call the gate directly with `POST http://127.0.0.1:6000/v1/request`:
 
 ```json
 {"action": {"type": "email", "to": "me@example.com", "subject": "...", "body": "..."},
