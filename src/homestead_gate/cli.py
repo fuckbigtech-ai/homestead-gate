@@ -3,6 +3,7 @@
   homestead-gate up --task "what you asked the agent to do"   run the gate on 127.0.0.1:6000
   homestead-gate demo                                          hijacked agent vs the gate, end to end
   homestead-gate watch                                         the receipts (same as `hsm watch`)
+  homestead-gate mcp                                           MCP tools for your agent (claude mcp add homestead-gate -- homestead-gate mcp)
 """
 from __future__ import annotations
 
@@ -119,6 +120,11 @@ def main(argv=None) -> int:
     d.add_argument("--auto-deny", action="store_true", help="answer 'no' automatically (for recordings)")
     d.add_argument("--delay", type=float, default=60, help="override wait in seconds")
     d.set_defaults(func=cmd_demo)
+
+    m = sub.add_parser("mcp", help="MCP server for your agent: send email / prepare tx, only via the gate")
+    m.add_argument("--gate", default="http://127.0.0.1:6000")
+    m.add_argument("--timeout", type=float, default=600, help="seconds to wait for your decision")
+    m.set_defaults(func=lambda a: __import__("homestead_gate.mcp", fromlist=["serve"]).serve(a.gate, a.timeout))
 
     w = sub.add_parser("watch", help="show the receipts; exits 1 if the chain is broken")
     w.add_argument("--ledger", default=str(HOME / "ledger"))
