@@ -290,7 +290,8 @@ def cmd_run(a) -> int:
                   phase=hl.PHASE_PRE)
 
     return run(cmd, allow_hosts=a.allow_host, gate_port=a.gate_port, model_port=a.model_port,
-               gate_home=HOME, ledger=led, allow_read=a.allow_read, pass_env=a.pass_env, on_deny=on_deny)
+               gate_home=HOME, ledger=led, allow_read=a.allow_read, pass_env=a.pass_env,
+               allow_write=a.allow_write, on_deny=on_deny)
 
 
 def cmd_creds_set(a) -> int:
@@ -439,6 +440,8 @@ def main(argv=None) -> int:
     r = sub.add_parser("run", help="run an agent sandboxed: internet only to allowed hosts, gate as its way out")
     r.add_argument("--allow-host", action="append", default=[], help="e.g. api.anthropic.com (repeatable, *.x ok)")
     r.add_argument("--allow-read", action="append", default=[], help="a path inside a blocked area the agent may read")
+    r.add_argument("--allow-write", action="append", default=[],
+                   help="Linux: another path the agent may write (the current directory and $TMPDIR always are)")
     r.add_argument("--pass-env", action="append", default=[], help="a secret-looking env var to keep, e.g. ANTHROPIC_API_KEY")
     r.add_argument("--gate-port", type=int, default=6000)
     r.add_argument("--model-port", type=int, default=11434)

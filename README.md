@@ -85,7 +85,7 @@ Each request goes through, in order:
 In this version email is dry-run (written to `~/.homestead-gate/outbox`) and wallet transactions
 are prepared for Sepolia only, unsigned. The gate holds no keys.
 
-### Make the gate the only way out (macOS)
+### Make the gate the only way out (macOS and Linux)
 
 ```bash
 homestead-gate run --allow-host api.anthropic.com --allow-read ~/Library/Keychains -- claude
@@ -108,7 +108,72 @@ on top of "allow everything else", so they stop what they name, not everything.
 
 Claude Code keeps its login in the macOS keychain, hence `--allow-read ~/Library/Keychains`.
 That also lets the agent ask the keychain for other items; macOS prompts you for most of them,
-but read the prompt before you click. Linux (bubblewrap) is next.
+but read the prompt before you click.
+
+#### Linux (bubblewrap)
+
+```bash
+sudo apt install bubblewrap              # or your distro's package
+cd ~/code/my-project && homestead-gate run --allow-host api.anthropic.com -- <agent>
+```
+
+On Linux `run` uses [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`). If bwrap
+is missing, or the kernel will not let it create namespaces, `run` refuses to start. It never
+runs the agent unconfined. The design:
+
+- **network:** the agent gets its own network namespace, with a loopback interface and nothing
+  else. It has no route out and no DNS, and it cannot reach your machine's loopback ports. The
+  gate, the local model and the egress proxy come in through one unix socket per port. A small
+  forwarder inside the sandbox listens on `127.0.0.1:<port>` before the agent starts. Only those
+  ports exist in there.
+- **files:** `/` is read-only. `/tmp`, `/var/tmp` and `/run` are fresh and empty. That hides the
+  host's unix sockets there: the Docker socket, the D-Bus and `systemd --user` buses (which can
+  start programs outside the sandbox, like `open` on macOS), gpg-agent and ssh-agent. Any other
+  unix socket that is live at launch is covered with an empty file. The agent can write only
+  to the current directory, `$TMPDIR` and paths you pass with `--allow-write`.
+- **secrets:** the same credential stores as on macOS, plus `~/.local/share/keyrings`,
+  `~/.config/hub` and cargo's credentials, are covered with empty read-only mounts. A store
+  that is a symlink (dotfile managers do this) is covered where it really lives.
+- **the gate itself, and places that run code later:** read-only, bound again after the
+  writable mounts. This covers the gate's state and code, this repo's `.git/hooks` and
+  `.git/config`, shell startup files, `~/bin`, `~/.local/bin`, git config and Claude Code
+  settings and hooks. It holds even when the gate's code is inside the current directory.
+- **processes:** new pid, IPC, UTS, user and cgroup namespaces, so the agent cannot see or
+  signal your other processes. All capabilities are dropped, `no_new_privs` is set, the
+  sandbox gets a new session (no typing into your terminal with `TIOCSTI`), and it dies with
+  `homestead-gate`.
+
+`run` refuses to start if the current directory is your home directory or contains it,
+because that directory is writable.
+
+Gaps on Linux, beyond the list below:
+
+- **`.env` files are found once, at launch.** bwrap cannot match a pattern, so `run` looks for
+  `.env` and `.env.*` in the current directory tree and at the top of `$HOME`, and covers each
+  one. It skips `.git`, `node_modules`, virtualenvs and caches, and stops after 20,000
+  directories. `.env` files anywhere else, for example in your other projects, are readable.
+  On macOS the rule matches every path.
+- **The credential list is a list.** Anything readable that it does not name is readable, for
+  example `~/.codex/auth.json`, `~/.claude/.credentials.json` or browser profiles.
+- **Sockets are covered once, at launch.** A socket created later outside `/tmp`, `/var/tmp`
+  and `/run` is reachable.
+- **Missing files cannot be protected.** A mount needs something to mount over. If a protected
+  path does not exist and it sits inside a writable directory, the agent can create it. The
+  `.git/hooks` directory is created before launch for this reason.
+- **Git worktrees:** when `.git` is a file, the real git directory is elsewhere and read-only,
+  so commits from inside the sandbox fail.
+- **Terminal programs:** the new session means the agent has no controlling terminal. On a
+  test box, raw mode on stdin worked, but `/dev/tty` failed to open, there was no job control,
+  and window resizes are not passed on. Full-screen agent UIs may misbehave.
+- **Claude Code on Linux is untested.** It writes `~/.claude/` and replaces `~/.claude.json`
+  by renaming a file in `$HOME`. Your home directory is read-only, so expect it to need
+  `--allow-write ~/.claude`. The `~/.claude.json` rename may still fail.
+- **Namespaces must be allowed.** Ubuntu 24.04 and later restrict unprivileged user
+  namespaces (`kernel.apparmor_restrict_unprivileged_userns`). The packaged bwrap ships an
+  AppArmor profile for this. If yours does not, `run` stops and says so.
+- **Don't run it as root.** Root inside the sandbox still owns root's files for reading.
+- **The kernel is shared.** A kernel exploit escapes any namespace sandbox.
+- Tested on Ubuntu (kernel 6.8, bubblewrap 0.9.0).
 
 ### Credential custody: the gate holds the keys, not the agent
 
@@ -136,8 +201,8 @@ compromised gate process has the password. Linux needs libsecret; there is no pl
   the agent can send to `api.anthropic.com` leaves your machine.
 - **An unsandboxed agent running as you.** Approval happens only in the gate's terminal (there is
   no approve endpoint), but outside `homestead-gate run` an agent can stop or reconfigure the gate.
-  Inside it, it can still send signals to your other processes; the sandbox limits files and
-  network, not everything.
+  Inside it on macOS, it can still send signals to your other processes; the sandbox limits files
+  and network, not everything. On Linux the agent has its own pid namespace and cannot see them.
 - **An agent that hides what it read.** The model sees what the agent reports reading. A hijacked
   agent can leave the injection out, and then the model judges the action against your task alone.
   Your task comes from you when you start the gate, never from the agent.
