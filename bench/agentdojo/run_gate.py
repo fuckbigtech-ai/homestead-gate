@@ -69,6 +69,22 @@ def known_contacts(env) -> list[str]:
     slack = getattr(env, "slack", None)
     if slack is not None:
         out.update(slack.users)
+    # Workspace/travel: the address book, people the user has emailed, and calendar participants.
+    # The attackers' drop addresses are absent (checked v1.2.2: mark.black-2134@gmail.com,
+    # janeLong@google.com, jay@google.com). Some injections NAME real contacts (lily.white@, the
+    # security@facebook.com sender); those stay, as they would in a real deployment.
+    inbox = getattr(env, "inbox", None)
+    if inbox is not None:
+        out.update(c.email for c in (getattr(inbox, "contact_list", None) or []))
+        for e in inbox.emails.values():
+            if e.sender == inbox.account_email:
+                out.update([*e.recipients, *(e.cc or []), *(e.bcc or [])])
+        out.discard(inbox.account_email)
+    cal = getattr(env, "calendar", None)
+    if cal is not None:
+        for ev in cal.events.values():
+            out.update(ev.participants)
+        out.discard(getattr(cal, "account_email", None))
     return sorted(out)
 
 
