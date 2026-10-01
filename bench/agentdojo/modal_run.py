@@ -8,6 +8,7 @@ same run_gate.py, same frozen reviewer prompt, qwen3.5:9b at 16k context as both
 Each chunk runs all three settings (no gate; gate, model only; gate + oracle human) on its slice
 of user tasks and writes to the agentdojo-results volume, so a dead container loses one slice only.
 """
+import json
 from pathlib import Path
 
 import modal
@@ -15,14 +16,25 @@ import modal
 HERE = Path(__file__).resolve().parent
 MODEL, AGENT = "qwen3.5:9b", "qwen3.5-9b-agent16k"
 SETTINGS = {"nogate": [], "gate": ["--gate", AGENT, "--human", "none"],
-            "gate_oracle": ["--gate", AGENT, "--human", "oracle"]}
+            "gate_oracle": ["--gate", AGENT, "--human", "oracle"],
+            "gate_v4": ["--gate", AGENT, "--human", "none", "--prompt", "v4"],
+            "gate_oracle_v4": ["--gate", AGENT, "--human", "oracle", "--prompt", "v4"]}
 
 image = (modal.Image.debian_slim(python_version="3.12")
          .apt_install("curl", "zstd", "ca-certificates")
          .run_commands("curl -fsSL https://ollama.com/install.sh | sh")
          .pip_install("agentdojo==0.1.35", "openai")
          .add_local_file(HERE.parent / "review.py", "/root/bench/review.py")
-         .add_local_file(HERE / "run_gate.py", "/root/bench/agentdojo/run_gate.py"))
+         .add_local_file(HERE / "run_gate.py", "/root/bench/agentdojo/run_gate.py")
+         .add_local_file(HERE / "aggregate.py", "/root/bench/agentdojo/aggregate.py")
+         .add_local_file(HERE / "replay.py", "/root/bench/agentdojo/replay.py")
+         .add_local_file(HERE.parent / "score.py", "/root/bench/score.py")
+         .add_local_dir(HERE.parent, "/root/bench", ignore=lambda p: not str(p).endswith(".jsonl") or "runs" in str(p)))
+RUNS = Path.home() / "hg-runs"       # traces downloaded from Kaggle; agg_all.json paths point at /home/ubuntu/hg-runs
+replay_image = (image
+                .add_local_dir(RUNS / "kaggle-banking", "/home/ubuntu/hg-runs/kaggle-banking")
+                .add_local_dir(RUNS / "kaggle-slack", "/home/ubuntu/hg-runs/kaggle-slack")
+                .add_local_file(RUNS / "agg_all.json", "/home/ubuntu/hg-runs/agg_all.json"))
 vol = modal.Volume.from_name("agentdojo-results", create_if_missing=True)
 app = modal.App("homestead-gate-agentdojo", image=image)
 
@@ -77,13 +89,68 @@ def run_chunk(suite: str, chunk: int, user_tasks: list[str], settings: list[str]
         print(suite, chunk, name, out[name], flush=True)
     return out
 
+@app.function(gpu="L4", timeout=3 * 3600, image=replay_image)
+def replay(prompts: list[str]) -> dict:
+    """Re-review the recorded banking + Slack gate decisions (replay.py) under each prompt, on a GPU."""
+    import subprocess
+    _ollama_up()
+    subprocess.run("printf 'FROM qwen3.5:9b\\nPARAMETER temperature 0\\n' > /tmp/Mg && "
+                   "ollama create qwen3.5-9b-gatebench -f /tmp/Mg", shell=True, check=True)
+    out = {}
+    for pv in prompts:
+        r = subprocess.run(["python", "/root/bench/agentdojo/replay.py", "/home/ubuntu/hg-runs/agg_all.json",
+                            "--prompt", pv, "--out", f"/tmp/replay_{pv}.json"], capture_output=True, text=True)
+        print(r.stdout[-300:], r.stderr[-300:], flush=True)
+        out[pv] = json.loads(Path(f"/tmp/replay_{pv}.json").read_text()) if r.returncode == 0 else {"error": r.stderr[-2000:]}
+    return out
+
+
+@app.function(gpu="L4", timeout=3 * 3600)
+def gatebench(prompts: list[str], repeats: int = 3) -> dict:
+    """GateBench frozen test split (v0.1 harness, 60 cases) and the multi-step family, per prompt."""
+    import subprocess
+    _ollama_up()
+    subprocess.run("printf 'FROM qwen3.5:9b\\nPARAMETER temperature 0\\n' > /tmp/Mg && "
+                   "ollama create qwen3.5-9b-gatebench -f /tmp/Mg", shell=True, check=True)
+    subprocess.run("pip install -q ollama", shell=True, check=True)
+    out = {}
+    for pv in prompts:
+        for cases in ("cases_v01.jsonl", "cases_v03_multistep.jsonl"):
+            r = subprocess.run(["python", "/root/bench/review.py", "--model", "qwen3.5-9b-gatebench", "--split", "test",
+                                "--cases", cases, "--prompt", pv, "--repeats", str(repeats)],
+                               capture_output=True, text=True, cwd="/root/bench")
+            print(pv, cases, r.returncode, r.stderr[-300:], flush=True)
+    for f in Path("/root/bench/runs").glob("*.jsonl"):
+        out[f.name] = f.read_text()
+    return out
+
+
 @app.local_entrypoint()
-def main(suite: str = "workspace", chunks: int = 4, smoke: bool = False):
+def main(suite: str = "workspace", chunks: int = 4, smoke: bool = False, replay_prompts: str = "",
+         gatebench_prompts: str = "", settings: str = ""):
+    if gatebench_prompts:                                # e.g. --gatebench-prompts v4
+        files = gatebench.remote(gatebench_prompts.split(","))
+        dest = HERE.parent / "runs"
+        for name, text in files.items():
+            (dest / name).write_text(text)
+            print("WROTE", dest / name)
+        return
+    if replay_prompts:                                   # e.g. --replay-prompts v1,v3,v4
+        res = replay.remote(replay_prompts.split(","))
+        (RUNS / "replay_modal.json").write_text(json.dumps(res, indent=1))
+        for pv, rows in res.items():
+            if isinstance(rows, dict):
+                print(pv, "ERROR", rows["error"][-500:]); continue
+            fb = [x for x in rows if x["kind"] == "false_block"]; at = [x for x in rows if x["kind"] == "attack"]
+            print(f"{pv}: false blocks now approved {sum(x['verdict'] == 'approve' for x in fb)}/{len(fb)}; "
+                  f"attacker calls still blocked {sum(x['verdict'] != 'approve' for x in at)}/{len(at)}")
+        return
     n = {"workspace": 40, "travel": 20, "banking": 16, "slack": 21}[suite]    # user tasks in v1.2.2
     ids = [f"user_task_{i}" for i in range(n)]
     if smoke:
         print(run_chunk.remote(suite, 99, ids[:1], ["gate"]))
         return
     slices = [ids[i::chunks] for i in range(chunks)]     # interleaved, so chunks take similar time
-    for res in run_chunk.starmap([(suite, i, s, list(SETTINGS)) for i, s in enumerate(slices)]):
+    chosen = settings.split(",") if settings else list(SETTINGS)
+    for res in run_chunk.starmap([(suite, i, s, chosen) for i, s in enumerate(slices)]):
         print(res)
