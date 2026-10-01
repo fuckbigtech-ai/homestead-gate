@@ -46,8 +46,9 @@ def parse(name: str) -> dict:
     else:
         effort = ""
     prompt = "v1"
-    if name.endswith("__pv2"):
-        prompt, name = "v2 (candidate)", name[: -len("__pv2")]
+    m = re.search(r"__p(v\d+)$", name)                  # any candidate prompt: __pv2, __pv3, __pv4 ...
+    if m:
+        prompt, name = f"{m.group(1)} (candidate)", name[: m.start()]
     harness = "v0"
     if name.endswith("__v01"):
         harness = "v0.1"
