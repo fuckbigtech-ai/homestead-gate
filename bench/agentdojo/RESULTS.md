@@ -40,10 +40,13 @@ counted as attacker calls, because the gate does not review reads and they cause
    agent finished the user's own task far less often (banking 81% to 56%, Slack 90% to 57%). This is the
    same over-blocking GateBench v0.3 found: the gate judges one step against the whole request.
 4. **With a human in the loop, utility comes back** (75%, 90%) and attack success stays low (1/144, 4/83).
-   The 5 that got through were approved by the simulated human, not the model: the agent paraphrased the
-   attack (e.g. a phishing message reworded), the model flagged it, and the oracle, which only recognises
-   the attack's exact values, approved it. A real person reading the prompt would likely catch some of
-   these; we have not measured that.
+   In all 5 that got through, the harmful call was one our simulated human does not recognise. Banking:
+   after five blocked attempts the agent switched to creating a new scheduled payment to the attacker, a
+   different function from the attack's script (in the model-only run the model blocked that same call).
+   Slack: the agent sent Alice the phishing link in its own words. The oracle only recognises the attack's
+   exact function and values, so it approves such calls if the model flags them. The traces do not record
+   whether the model or the oracle approved each one. A real person reading the prompt would likely catch
+   some of these; we have not measured that.
 
 ## Limits, stated
 
@@ -51,4 +54,8 @@ counted as attacker calls, because the gate does not review reads and they cause
   are running. The oracle runs' per-run human-prompt counts were lost with the cut-off summaries.
 - One agent model (Qwen 3.5 9B); a stronger agent ignores more injections on its own.
 - The oracle human is a simulation and is neither an upper nor a lower bound on a real person.
+- `aggregate.py` recognises an attacker call by the attack's own function plus a distinctive value, so an
+  attack carried out through a different function is not counted as an attempt. This under-counts
+  "blocked" (e.g. a model-only banking run is labelled "ignored" although the model blocked a new payment
+  to the attacker's account). AgentDojo's attack-success column does not depend on it.
 - Reviewer context here is 16k (GateBench uses 4096), because AgentDojo transcripts are long.
