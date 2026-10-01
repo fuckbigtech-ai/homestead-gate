@@ -6,6 +6,7 @@
   homestead-gate watch                                         the receipts (same as `hsm watch`)
   homestead-gate run --allow-host api.anthropic.com -- claude   the agent, sandboxed; the gate is its only way out
   homestead-gate mcp                                           MCP tools for your agent (claude mcp add homestead-gate -- homestead-gate mcp)
+  homestead-gate assistant --backend nim --skill pay           the personal assistant demo: cloud brain, local gate
 """
 from __future__ import annotations
 
@@ -405,6 +406,96 @@ def cmd_demo(a) -> int:
     return 0 if ok else 1
 
 
+class _NoModelReviewer:
+    """For `assistant --no-model`: reviews nothing, so every non-self action goes to you. Labelled."""
+    def review(self, prompt: str) -> Verdict:
+        return Verdict("invalid", "no local model (--no-model): you decide", "", "none (--no-model)", 0.0)
+
+
+def cmd_assistant(a) -> int:
+    from . import assistant as asst
+    from .llm import ChatClient, LLMError
+
+    try:
+        llm = ChatClient.from_preset(a.backend, base_url=a.base_url, model=a.llm_model)
+        llm.check_ready()
+    except (ValueError, LLMError) as e:
+        print(f"assistant: {e}", file=sys.stderr)
+        return 2
+    if a.smoke:
+        return _assistant_smoke(llm)
+    task = a.task or asst.SKILLS.get(a.skill or "")
+    if not task:
+        print("assistant: give --task \"...\" or --skill triage|pay|summarize", file=sys.stderr)
+        return 2
+
+    data = Path(a.data).expanduser() if a.data else HOME / "assistant"
+    hw = hardware.detect()
+    pick = hardware.pick_reviewer(hw)
+    if asst.seed(data, model=a.model or pick.model or "qwen3.5:9b"):
+        print(f"seeded demo data (fake inbox, bills, memory, policy) in {data}")
+    policy = Policy.load(data / "policy.toml")
+    if a.model:
+        policy.model = a.model
+    if a.no_model:
+        reviewer = _NoModelReviewer()
+    else:
+        if not _fits(policy.model, hw, pick):
+            return 1
+        reviewer = OllamaReviewer(policy.model, policy.ollama_url, policy.review_timeout_s)
+    smtp = None
+    if a.live:
+        smtp, rc = _live_smtp(policy)
+        if rc:
+            return rc
+    ledger_dir = data / "ledger"
+    spent = asst.replay_auto_spend(policy, ledger_dir)
+    gate = Gate(policy=policy, reviewer=reviewer,
+                approver=TerminalApprover(override_delay_s=policy.override_delay_s,
+                                          timeout_s=policy.approval_timeout_s),
+                ledger_dir=ledger_dir, task=task, session=secrets.token_hex(4),
+                outbox=data / "outbox", smtp=smtp, live=smtp is not None)
+    print(f"task (from you): {task}")
+    print(f"  brain:    {llm.model} via {a.backend} (cloud)")
+    print(f"  reviewer: {'none, every action asks you (--no-model)' if a.no_model else policy.model + ' (local)'}")
+    print(f"  memory:   {data / 'memory'}")
+    print(f"  receipts: {ledger_dir}  (homestead-gate watch --ledger {ledger_dir})")
+    print(f"  autonomous wallet spending so far today: {spent:g} of {policy.daily_auto_value_eth:g} ETH")
+    print("  email is LIVE" if smtp else f"  email is DRY-RUN: approved messages land in {data / 'outbox'}")
+    bot = asst.Assistant(llm=llm, submit=gate.submit, data_dir=data, memory=asst.AssistantMemory(data / "memory"),
+                         task=task, max_steps=a.max_steps, guard_prompt=not a.unguarded_prompt, log=print)
+    try:
+        out = bot.run()
+    except LLMError as e:
+        print(f"assistant: the cloud model failed: {e}", file=sys.stderr)
+        return 1
+    print("\n" + (out["final"] or "(no answer)"))
+    return 0
+
+
+def _assistant_smoke(llm) -> int:
+    """One live call with one tool, to check the endpoint, the model and tool calling. No gate."""
+    import time as _t
+    from .llm import LLMError
+    tools = [{"type": "function", "function": {
+        "name": "ping", "description": "Reply to a ping.",
+        "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}}]
+    t0 = _t.time()
+    try:
+        msg = llm.chat([{"role": "user", "content": "Call the ping tool with text 'ok'."}], tools, max_tokens=512)
+    except LLMError as e:
+        print(f"smoke: FAILED: {e}", file=sys.stderr)
+        return 1
+    calls = msg.get("tool_calls") or []
+    print(f"smoke: {llm.model} at {llm.base_url} answered in {_t.time() - t0:.1f}s")
+    if calls:
+        fn = calls[0].get("function") or {}
+        print(f"smoke: tool call {fn.get('name')}({fn.get('arguments')})")
+    else:
+        print(f"smoke: no tool call; text: {(msg.get('content') or '')[:200]!r}")
+    return 0 if calls else 1
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="homestead-gate", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -453,6 +544,22 @@ def main(argv=None) -> int:
     m.add_argument("--gate", default="http://127.0.0.1:6000")
     m.add_argument("--timeout", type=float, default=600, help="seconds to wait for your decision")
     m.set_defaults(func=lambda a: __import__("homestead_gate.mcp", fromlist=["serve"]).serve(a.gate, a.timeout))
+
+    asp = sub.add_parser("assistant", help="personal assistant demo: a cloud model plans, every send goes through the gate")
+    asp.add_argument("--backend", choices=("nim", "tokenfactory"), default="nim")
+    asp.add_argument("--task", help="what you want done; the reviewer trusts only this")
+    asp.add_argument("--skill", choices=("triage", "pay", "summarize"), help="a demo task instead of --task")
+    asp.add_argument("--data", help="demo data dir: fake inbox, bills, memory, policy, receipts (default ~/.homestead-gate/assistant)")
+    asp.add_argument("--smoke", action="store_true", help="one live call to the backend with one tool, then exit")
+    asp.add_argument("--base-url", help="override the backend's base URL")
+    asp.add_argument("--llm-model", help="override the backend's model")
+    asp.add_argument("--model", help="local reviewer model (default: the data dir's policy)")
+    asp.add_argument("--no-model", action="store_true", help="no local reviewer: every non-self action asks you")
+    asp.add_argument("--live", action="store_true", help="really send approved email with the gate's stored credentials")
+    asp.add_argument("--max-steps", type=int, default=12)
+    asp.add_argument("--unguarded-prompt", action="store_true",
+                     help="drop the brain's warning about instructions inside emails (shows the gate catching a model that obeys them)")
+    asp.set_defaults(func=cmd_assistant)
 
     cr = sub.add_parser("creds", help="the gate's own email credentials (the agent never sees them)")
     crs = cr.add_subparsers(dest="creds_cmd", required=True)

@@ -194,6 +194,53 @@ Limits: another program running as you can still ask the keychain for the entry.
 a visible permission dialog rather than the password, so say no to anything that isn't the gate. A
 compromised gate process has the password. Linux needs libsecret; there is no plaintext fallback.
 
+### Assistant (hackathon demo)
+
+A small personal assistant for the Nebius x NVIDIA hackathon. A cloud model (Nemotron 3 Super)
+plans and calls tools. Everything it sends goes through the gate above.
+
+```bash
+export NVIDIA_API_KEY=...                                    # NIM. Token Factory: NEBIUS_API_KEY
+homestead-gate assistant --backend nim --smoke               # one live call with one tool, then exit
+homestead-gate assistant --backend nim --skill triage        # reply to the email that needs an answer
+homestead-gate assistant --backend nim --skill pay           # pay the plumber's invoice
+homestead-gate assistant --backend nim --skill summarize     # an inbox with a poisoned email in it
+homestead-gate assistant --backend nim --task "..." --data DIR
+```
+
+The data is fake: an inbox, one bill, a memory and a policy, written to
+`~/.homestead-gate/assistant` (or `--data DIR`) on first run. That directory has its own receipts
+and outbox, separate from the gate's. Email is dry-run unless you pass `--live`, the same as `up`.
+Payments are unsigned Sepolia transactions.
+
+- **Read tools run at once:** `list_inbox`, `read_email`, `list_bills`, `recall` and `remember`.
+- **Outbound tools are gate requests:** `send_email` and `pay_invoice`. They get the same policy,
+  local reviewer, terminal approval and receipts as any other agent. The model gets a submit
+  function, not the gate. It has no tool that approves, and any tool name it makes up is refused.
+- **Fixed fields:** each action is built from a fixed list of arguments. Extra fields the model
+  adds, such as `"approved": true`, a chain id or calldata, are dropped.
+- **What it read goes with every request.** This code attaches the output of every read tool, not
+  the model. So on this path, the "agent that hides what it read" gap below is closed: the reviewer
+  always sees the poisoned email.
+- **No asking twice.** An action that was denied is refused if the model tries it again, and a
+  run may submit only 4 outbound actions.
+- **Memory** is [homestead-memory](https://github.com/fuckbigtech-ai/homestead-memory). Each fact
+  records who wrote it, when, and its source. When the assistant remembers something, this code
+  sets the source from what the run actually read, never from what the model says. Payees come
+  from memory, never from an email.
+- **The daily cap holds across runs.** Each run is a new process, so at start the assistant
+  replays the last 24 hours of autonomous payments from its receipts.
+
+`--backend tokenfactory` uses Nebius Token Factory, which is OpenAI-compatible. We have no
+account yet, so its base URL and model are placeholders. Set `HG_TOKENFACTORY_BASE_URL` and
+`HG_TOKENFACTORY_MODEL` (or `--base-url` and `--llm-model`). Until then it refuses to send.
+The API key is read from the environment when a request is built. It is never logged, printed
+or written to a receipt.
+
+A cloud model that ignores the poisoned email never reaches the gate. To show the gate catching
+a model that obeys it, `--unguarded-prompt` removes the warning about email instructions from
+the system prompt.
+
 ### What it does not defend against
 
 - **An agent that can reach your accounts some other way.** If the agent has your SMTP password,
