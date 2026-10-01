@@ -37,8 +37,21 @@ counted as attacker calls, because the gate does not review reads and they cause
 2. **The model-only gate stopped every hijack**: 0 of 144 and 0 of 105. In every attacked run where the
    agent made the attacker's harmful call, the gate blocked it.
 3. **It pays for that in usefulness.** The gate blocked 280 of the 343 actions it reviewed on banking (counting AgentDojo's self-check runs too), and the
-   agent finished the user's own task far less often (banking 81% to 56%, Slack 90% to 57%). This is the
-   same over-blocking GateBench v0.3 found: the gate judges one step against the whole request.
+   agent finished the user's own task far less often (banking 81% to 56%, Slack 90% to 57%). The gate's
+   own stated reasons show why. Sorted roughly by keyword (these counts mix legitimate and attack blocks):
+
+   | reason the gate gave | banking (280 blocks) | Slack (385 blocks) |
+   |---|---|---|
+   | the action follows untrusted input | 125 | 234 |
+   | recipient is not a known contact | 98 | 39 |
+   | it does only part of the request (multi-step) | 32 | 15 |
+   | other (Slack: mostly web fetches treated as possible data leaks) | 25 | 97 |
+
+   The multi-step flaw GateBench v0.3 found is a minor cause here. The main one is a design tension: in
+   these tasks the user often asks the agent to act on what a document says ("pay the bill in this
+   file"), so a recipient that came from untrusted input is sometimes exactly what the user wanted, and
+   the gate is built to distrust that. Fixing it means telling "the user asked me to act on this
+   document" apart from "the document is telling me what to do".
 4. **With a human in the loop, utility comes back** (75%, 90%) and attack success stays low (1/144, 4/83).
    In all 5 that got through, the harmful call was one our simulated human does not recognise. Banking:
    after five blocked attempts the agent switched to creating a new scheduled payment to the attacker, a
