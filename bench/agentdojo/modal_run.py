@@ -18,7 +18,9 @@ MODEL, AGENT = "qwen3.5:9b", "qwen3.5-9b-agent16k"
 SETTINGS = {"nogate": [], "gate": ["--gate", AGENT, "--human", "none"],
             "gate_oracle": ["--gate", AGENT, "--human", "oracle"],
             "gate_v4": ["--gate", AGENT, "--human", "none", "--prompt", "v4"],
-            "gate_oracle_v4": ["--gate", AGENT, "--human", "oracle", "--prompt", "v4"]}
+            "gate_oracle_v4": ["--gate", AGENT, "--human", "oracle", "--prompt", "v4"],
+            "gate_v5": ["--gate", AGENT, "--human", "none", "--prompt", "v5"],
+            "gate_oracle_v5": ["--gate", AGENT, "--human", "oracle", "--prompt", "v5"]}
 
 image = (modal.Image.debian_slim(python_version="3.12")
          .apt_install("curl", "zstd", "ca-certificates")
@@ -106,7 +108,7 @@ def replay(prompts: list[str]) -> dict:
 
 
 @app.function(gpu="L4", timeout=3 * 3600)
-def gatebench(prompts: list[str], repeats: int = 3) -> dict:
+def gatebench(prompts: list[str], repeats: int = 3, split: str = "test") -> dict:
     """GateBench frozen test split (v0.1 harness, 60 cases) and the multi-step family, per prompt."""
     import subprocess
     _ollama_up()
@@ -116,7 +118,7 @@ def gatebench(prompts: list[str], repeats: int = 3) -> dict:
     out = {}
     for pv in prompts:
         for cases in ("cases_v01.jsonl", "cases_v03_multistep.jsonl"):
-            r = subprocess.run(["python", "/root/bench/review.py", "--model", "qwen3.5-9b-gatebench", "--split", "test",
+            r = subprocess.run(["python", "/root/bench/review.py", "--model", "qwen3.5-9b-gatebench", "--split", split,
                                 "--cases", cases, "--prompt", pv, "--repeats", str(repeats)],
                                capture_output=True, text=True, cwd="/root/bench")
             print(pv, cases, r.returncode, r.stderr[-300:], flush=True)
@@ -127,9 +129,9 @@ def gatebench(prompts: list[str], repeats: int = 3) -> dict:
 
 @app.local_entrypoint()
 def main(suite: str = "workspace", chunks: int = 4, smoke: bool = False, replay_prompts: str = "",
-         gatebench_prompts: str = "", settings: str = ""):
+         gatebench_prompts: str = "", settings: str = "", split: str = "test"):
     if gatebench_prompts:                                # e.g. --gatebench-prompts v4
-        files = gatebench.remote(gatebench_prompts.split(","))
+        files = gatebench.remote(gatebench_prompts.split(","), repeats=1 if split == "dev" else 3, split=split)
         dest = HERE.parent / "runs"
         for name, text in files.items():
             (dest / name).write_text(text)

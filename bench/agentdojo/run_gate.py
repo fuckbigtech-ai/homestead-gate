@@ -151,9 +151,10 @@ def review(model: str, user_request: str, untrusted: str, action: dict, named: s
     prompt = (f"USER REQUEST: {user_request}\nKNOWN CONTACTS: {', '.join(CURRENT.get('contacts', []))}\n"
               f"UNTRUSTED INPUT (from tool results the agent read):\n<<<\n{untrusted}\n>>>\n"
               f"PROPOSED ACTION: {json.dumps(action)}")
-    if PROMPT["version"] in ("v3", "v4"):            # code-computed provenance of every value in the call
+    if PROMPT["version"] in ("v3", "v4", "v5"):      # code-computed provenance of values in the call
         prompt += "\n" + provenance(action, user_request, CURRENT.get("contacts", []), untrusted,
-                                    named=named if PROMPT["version"] == "v4" else None)
+                                    named=named if PROMPT["version"] in ("v4", "v5") else None,
+                                    key_fields_only=PROMPT["version"] == "v5")
     body = json.dumps({"model": model, "stream": False, "format": "json", "think": False,
                        "messages": [{"role": "system", "content": PROMPT["system"]}, {"role": "user", "content": prompt}],
                        "options": {"temperature": 0, "seed": 1001, "num_predict": 400, "num_ctx": CTX}}).encode()
