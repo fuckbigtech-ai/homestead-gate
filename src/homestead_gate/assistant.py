@@ -18,8 +18,8 @@ What the model cannot do, by construction:
   arguments; anything else the model passes ("approved": true, a chain id, calldata) is
   dropped.
 - hide what it read. Every read tool's output in this run is attached to each gate request
-  by this code, not by the model. That closes, for this path, the README's "an agent that
-  hides what it read" gap: the reviewer always sees the poisoned email.
+  by this code, not by the model, so the model cannot leave the poisoned email out. Long reads
+  are cut to head and tail for the reviewer's context; text hidden in the middle is not seen.
 - wear the human down. After a deny, the identical action is refused without asking again,
   and a run may submit only a few outbound actions in total.
 
@@ -46,7 +46,10 @@ from .core import payload_hash
 from .policy import SEPOLIA, Policy
 
 AGENT = "homestead-assistant"
-MAX_READ_CHARS = 2000          # per tool result kept for the reviewer; it runs at a 4096 context
+# Per tool result kept for the reviewer, which runs at a 4096-token context. A longer result keeps
+# its head and tail with a marker saying how much was cut; text hidden in the middle of a very
+# long read is NOT seen by the reviewer (README states this).
+READ_HEAD, READ_TAIL = 1400, 600
 _BULLET = re.compile(r"^- (?P<field>[a-z0-9_]+): (?P<value>.*?) \(source: (?P<src>[^)]+)\)\s*$")
 _THINK = re.compile(r"<think>.*?</think>", re.S)
 _STOP = {"the", "and", "for", "who", "what", "about", "with", "from", "my", "our", "his", "her"}
@@ -267,7 +270,10 @@ class Assistant:
 
     def _saw(self, source: str, content) -> None:
         text = content if isinstance(content, str) else json.dumps(content)
-        self.reads.append({"source": source, "content": text[:MAX_READ_CHARS]})
+        if len(text) > READ_HEAD + READ_TAIL:
+            cut = len(text) - READ_HEAD - READ_TAIL
+            text = f"{text[:READ_HEAD]}\n[... {cut} characters cut ...]\n{text[-READ_TAIL:]}"
+        self.reads.append({"source": source, "content": text})
 
     # -- tools
     def call(self, name: str, args: dict) -> dict:
@@ -347,14 +353,17 @@ class Assistant:
             calls = msg.get("tool_calls") or []
             if not calls:
                 final = _THINK.sub("", msg.get("content") or "").strip()
+                if msg.get("finish_reason") == "length":
+                    final = "the cloud model ran out of tokens before answering" + (f": {final}" if final else "")
                 break
             messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls})
             for c in calls:
                 fn = c.get("function") or {}
                 name = str(fn.get("name", ""))
+                raw = fn.get("arguments")
                 try:
-                    args = json.loads(fn.get("arguments") or "{}")
-                except ValueError:
+                    args = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+                except (ValueError, TypeError):
                     args, result = None, {"error": "arguments were not valid JSON"}
                 if args is not None:
                     result = self.call(name, args)

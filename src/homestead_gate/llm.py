@@ -18,6 +18,7 @@ Retry-After when the server sends one. Any other HTTP error is raised at once.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import time
@@ -125,7 +126,8 @@ class ChatClient:
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None, *,
              temperature: float = 0.2, max_tokens: int = 1024) -> dict:
-        """One chat completion. Returns choices[0].message (role, content, maybe tool_calls)."""
+        """One chat completion. Returns choices[0].message (role, content, maybe tool_calls), plus
+        the choice's finish_reason under "finish_reason" so a cut-off answer is visible."""
         self.check_ready()
         payload: dict[str, Any] = {"model": self.model, "messages": messages,
                                    "temperature": temperature, "max_tokens": max_tokens, **self.extra_body}
@@ -140,14 +142,15 @@ class ChatClient:
             try:
                 send = self.transport or urllib_transport
                 status, raw, rh = send(url, headers, body, self.timeout_s)
-            except (urllib.error.URLError, TimeoutError, OSError) as e:
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as e:
                 status, raw, rh, neterr = 0, b"", {}, type(e).__name__
             else:
                 neterr = None
             del headers   # nothing below may see the key
             if status == 200:
                 try:
-                    return json.loads(raw)["choices"][0]["message"]
+                    choice = json.loads(raw)["choices"][0]
+                    return {**choice["message"], "finish_reason": choice.get("finish_reason")}
                 except (ValueError, KeyError, IndexError, TypeError) as e:
                     raise LLMError(f"unexpected response shape ({type(e).__name__})", status) from None
             retryable = neterr is not None or status == 429 or 500 <= status < 600

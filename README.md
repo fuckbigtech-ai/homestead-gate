@@ -220,8 +220,12 @@ Payments are unsigned Sepolia transactions.
 - **Fixed fields:** each action is built from a fixed list of arguments. Extra fields the model
   adds, such as `"approved": true`, a chain id or calldata, are dropped.
 - **What it read goes with every request.** This code attaches the output of every read tool, not
-  the model. So on this path, the "agent that hides what it read" gap below is closed: the reviewer
-  always sees the poisoned email.
+  the model. So on this path the model cannot leave the poisoned email out, which narrows the
+  "agent that hides what it read" gap below. Limits: the reviewer runs at a 4096-token context, so
+  a long read keeps only its first 1400 and last 600 characters, with a note of how much was cut.
+  Text hidden in the middle of a long email reaches the cloud model but not the reviewer. And
+  GateBench measured one untrusted source per request; this path sends several, a shape the
+  published numbers do not cover.
 - **No asking twice.** An action that was denied is refused if the model tries it again, and a
   run may submit only 4 outbound actions.
 - **Memory** is [homestead-memory](https://github.com/fuckbigtech-ai/homestead-memory). Each fact

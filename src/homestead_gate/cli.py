@@ -487,7 +487,8 @@ def _assistant_smoke(llm) -> int:
         print(f"smoke: FAILED: {e}", file=sys.stderr)
         return 1
     calls = msg.get("tool_calls") or []
-    print(f"smoke: {llm.model} at {llm.base_url} answered in {_t.time() - t0:.1f}s")
+    print(f"smoke: {llm.model} at {llm.base_url} answered in {_t.time() - t0:.1f}s "
+          f"(finish_reason {msg.get('finish_reason')}, reasoning {'yes' if msg.get('reasoning_content') else 'no'})")
     if calls:
         fn = calls[0].get("function") or {}
         print(f"smoke: tool call {fn.get('name')}({fn.get('arguments')})")
