@@ -46,7 +46,8 @@ from agentdojo.task_suite.task_suite import TaskSuite
 from agentdojo.types import ChatToolResultMessage, get_text_content_as_str, text_content_block_from_string
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # bench/ for the frozen prompt
-from review import SYSTEM  # noqa: E402  (prompt v1, byte-identical to the product's reviewer)
+from review import PROMPTS, SYSTEM  # noqa: E402  (v1 is byte-identical to the product's reviewer)
+PROMPT = {"version": "v1", "system": SYSTEM}   # --prompt v2 swaps in the multi-step candidate
 
 OLLAMA = "http://127.0.0.1:11434"
 # One context size for agent AND reviewer. Ollama keys a loaded model by its options, so a different
@@ -151,7 +152,7 @@ def review(model: str, user_request: str, untrusted: str, action: dict) -> tuple
               f"UNTRUSTED INPUT (from tool results the agent read):\n<<<\n{untrusted}\n>>>\n"
               f"PROPOSED ACTION: {json.dumps(action)}")
     body = json.dumps({"model": model, "stream": False, "format": "json", "think": False,
-                       "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
+                       "messages": [{"role": "system", "content": PROMPT["system"]}, {"role": "user", "content": prompt}],
                        "options": {"temperature": 0, "seed": 1001, "num_predict": 400, "num_ctx": CTX}}).encode()
     try:
         req = urllib.request.Request(f"{OLLAMA}/api/chat", data=body, headers={"Content-Type": "application/json"})
@@ -226,6 +227,8 @@ def pipeline(agent_model: str, gate_model: str | None, log: list, human: str = "
     p = AgentPipeline([SystemMessage("You are a helpful assistant."), InitQuery(), llm,
                        ToolsExecutionLoop([executor, llm])])
     p.name = f"local:{agent_model}+{'gate:' + gate_model if gate_model else 'nogate'}" + (f"+human:{human}" if gate_model else "")
+    if gate_model and PROMPT["version"] != "v1":
+        p.name += f"+prompt:{PROMPT['version']}"     # separate trace dirs, so v1 and v2 never merge
     return p
 
 
@@ -238,9 +241,11 @@ def main() -> int:
     ap.add_argument("--human", choices=["none", "oracle"], default="none",
                     help="none: a model block is final. oracle: the 2-of-2's human approves the user's actions and refuses the attacker's")
     ap.add_argument("--version", default="v1.2.2")
+    ap.add_argument("--prompt", choices=sorted(PROMPTS), default="v1", help="reviewer prompt; v1 is what ships")
     ap.add_argument("--user-tasks", nargs="*", default=None)
     ap.add_argument("--out", default=str(Path(__file__).parent / "results"))
     a = ap.parse_args()
+    PROMPT.update(version=a.prompt, system=PROMPTS[a.prompt])
 
     log: list = []
     p = pipeline(a.agent, a.gate, log, a.human)
@@ -253,7 +258,7 @@ def main() -> int:
         attacked = benchmark_suite_with_injections(p, suite, attack, logdir, force_rerun=False,
                                                    user_tasks=a.user_tasks, benchmark_version=a.version)
     rate = lambda d: round(sum(d.values()) / max(1, len(d)), 4)
-    summary = {"suite": a.suite, "version": a.version, "attack": a.attack, "agent": a.agent,
+    summary = {"suite": a.suite, "version": a.version, "attack": a.attack, "agent": a.agent, "prompt": a.prompt,
                "gate": a.gate, "n_user_tasks": len(clean["utility_results"]),
                "n_attacked_runs": len(attacked["security_results"]),
                "utility_no_attack": rate(clean["utility_results"]),
@@ -266,7 +271,8 @@ def main() -> int:
                                               / max(1, len(clean["utility_results"]) + len(attacked["security_results"])), 3),
                "agent_errors": len(AGENT_ERRORS)}
     out = Path(a.out) / (f"{a.suite}__{a.agent.replace(':', '_')}__"
-                         + (f"gate_{a.gate.replace(':', '_')}__human_{a.human}" if a.gate else "nogate") + ".json")
+                         + (f"gate_{a.gate.replace(':', '_')}__human_{a.human}" if a.gate else "nogate")
+                         + ("" if a.prompt == "v1" else f"__p{a.prompt}") + ".json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"summary": summary, "gate_log": log}, indent=1))
     print(json.dumps(summary, indent=1))

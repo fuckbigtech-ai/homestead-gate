@@ -46,7 +46,9 @@ def side_effecting(fn: str) -> bool:
 def setting_of(pipeline: str) -> str:
     if "+nogate" in pipeline:
         return "no gate"
-    return "gate + oracle human" if "human:oracle" in pipeline else "gate (model only)"
+    base = "gate + oracle human" if "human:oracle" in pipeline else "gate (model only)"
+    tag = pipeline.split("+prompt:", 1)[1] if "+prompt:" in pipeline else ""
+    return base + (f", prompt {tag}" if tag else "")
 
 
 def _vals(x) -> set[str]:
@@ -131,7 +133,8 @@ def table(runs) -> str:
     g = defaultdict(list)
     for r in runs:
         g[(r["suite"], r["setting"])].append(r)
-    order = {"no gate": 0, "gate (model only)": 1, "gate + oracle human": 2}
+    order = {"no gate": 0, "gate (model only)": 1, "gate (model only), prompt v2": 2,
+             "gate + oracle human": 3, "gate + oracle human, prompt v2": 4}
     lines = ["| suite | setting | user tasks | utility (no attack) | utility (under attack) | attack success | "
              "attacked runs: ignored / blocked / tried, failed / through | legit actions blocked per run |",
              "|---|---|---|---|---|---|---|---|"]
