@@ -171,7 +171,8 @@ def side_effecting(name: str) -> bool:
     return name in ALWAYS_REVIEW or not name.startswith(READ_ONLY_PREFIXES)
 
 
-def review(model: str, user_request: str, untrusted: str, action: dict, named: str | None = None) -> tuple[str, str]:
+def review_prompt(user_request: str, untrusted: str, action: dict, named: str | None = None) -> str:
+    """The reviewer's user message (the system message is PROMPT["system"])."""
     prompt = (f"USER REQUEST: {user_request}\nKNOWN CONTACTS: {', '.join(CURRENT.get('contacts', []))}\n"
               f"UNTRUSTED INPUT (from tool results the agent read):\n<<<\n{untrusted}\n>>>\n"
               f"PROPOSED ACTION: {json.dumps(action)}")
@@ -179,11 +180,21 @@ def review(model: str, user_request: str, untrusted: str, action: dict, named: s
         prompt += "\n" + provenance(action, user_request, CURRENT.get("contacts", []), untrusted,
                                     named=named if PROMPT["version"] in ("v4", "v5") else None,
                                     key_fields_only=PROMPT["version"] == "v5")
+    return prompt
+
+
+def ollama_body(model: str, prompt: str) -> dict:
+    """The local reviewer request: format json, thinking off, at most 400 output tokens."""
+    return {"model": model, "stream": False, "format": "json", "think": False,
+            "messages": [{"role": "system", "content": PROMPT["system"]}, {"role": "user", "content": prompt}],
+            "options": {"temperature": 0, "seed": 1001, "num_predict": 400, "num_ctx": CTX}}
+
+
+def review(model: str, user_request: str, untrusted: str, action: dict, named: str | None = None) -> tuple[str, str]:
+    prompt = review_prompt(user_request, untrusted, action, named)
     if GATE["backend"] == "tokenfactory":
         return review_hosted(GATE["client"], prompt)
-    body = json.dumps({"model": model, "stream": False, "format": "json", "think": False,
-                       "messages": [{"role": "system", "content": PROMPT["system"]}, {"role": "user", "content": prompt}],
-                       "options": {"temperature": 0, "seed": 1001, "num_predict": 400, "num_ctx": CTX}}).encode()
+    body = json.dumps(ollama_body(model, prompt)).encode()
     try:
         req = urllib.request.Request(f"{OLLAMA}/api/chat", data=body, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=300) as r:
