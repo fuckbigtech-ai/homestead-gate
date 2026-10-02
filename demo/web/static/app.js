@@ -499,7 +499,7 @@ function onSummary(d) {
     counts = "Nothing reached the gate in these runs.";
   } else if (d.outbound === 0 && scenario() === "agentdojo") {
     counts = "Nothing reached the gate: with its warning on, the brain did not act on the published attack this " +
-      "time. On AgentDojo's banking suite it did in 38% of attacked runs; the gate stopped every one (see RESULTS.md).";
+      "time. On AgentDojo's banking suite it did in 38% of attacked runs; with the gate, none got through (0 of 144, see RESULTS.md).";
   } else if (d.outbound === 0) {
     counts = $("unguarded").checked
       ? "Nothing reached the gate: the assistant did not try to send anything this time."
