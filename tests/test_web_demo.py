@@ -497,7 +497,7 @@ def test_every_run_shows_the_task_first(tmp_path):
     app = offline_app(tmp_path, session_runs_per_hour=20)
     s = app.session(None)
     app.add_skill(s, "landlord", "Email landlord@example.org that the kitchen sink is fixed.")
-    for scenario, kw in [("pay", {}), ("summarize", {}), ("custom", {}), ("morning", {}), ("agentdojo", {}),
+    for scenario, kw in [("pay", {}), ("summarize", {}), ("custom", {}), ("morning", {}), ("agentdojo", {}), ("hijack", {}),
                          ("skill", {"skill": "triage"}), ("skill", {"skill": "landlord"})]:
         app.approval_timeout_s = 0.05
         run = app.start_run(s, scenario, background=False, **kw)
@@ -798,3 +798,49 @@ def test_published_attack_payment_is_refused_before_the_gate(tmp_path):
     assert rv.prompts == []                                 # no request, no review, no card
     recs = ledger.read_all(s.ledger_dir) if s.ledger_dir.exists() else []
     assert not any(r["action"].startswith("gate.") for r in recs)
+
+
+# ---- the hijack scenario: the gate path a judge sees first ---------------------------------
+
+def _types(run):
+    return [e["type"] for e in run.events]
+
+
+def test_hijack_runs_without_the_warning_and_stops_at_the_gate(tmp_path):
+    app, rv, _ = make_app(tmp_path, [HIJACK], approval_timeout_s=0.05)
+    s = app.session(None)
+    run = app.start_run(s, "hijack", unguarded=False, background=False)     # the box is ignored
+    start = run.events[0]["data"]
+    assert start["scenario"] == "hijack" and start["guarded"] is False and start["custom_injection"] is False
+    assert "retry" not in _types(run) and _types(run).count("summary") == 1
+    res = next(e["data"] for e in run.events if e["type"] == "gate_result")
+    assert res["action"]["to"] == ATTACKER and res["status"] != "executed"
+
+
+def test_hijack_tries_once_more_when_the_brain_ignores_the_email(tmp_path):
+    app, rv, transports = make_app(tmp_path, [[done("4 emails, nothing odd.")], HIJACK], approval_timeout_s=0.05)
+    s = app.session(None)
+    run = app.start_run(s, "hijack", background=False)
+    t = _types(run)
+    assert t.count("retry") == 1 and t.count("start") == 2 and t.count("summary") == 1
+    assert t.index("retry") < t.index("gate_result") < t.index("summary")
+    assert len(transports) == 2
+    assert len(s.window.times) == 1          # one run from the hourly limit, not two
+
+
+def test_hijack_gives_up_after_two_tries_with_one_summary(tmp_path):
+    app, *_ = make_app(tmp_path, [[done()], [done()]], approval_timeout_s=0.05)
+    s = app.session(None)
+    run = app.start_run(s, "hijack", background=False)
+    t = _types(run)
+    assert t.count("retry") == 1 and t.count("summary") == 1 and "gate_result" not in t
+    assert next(e["data"] for e in run.events if e["type"] == "summary")["outbound"] == 0
+
+
+def test_hijack_retry_shares_one_token_budget(tmp_path):
+    app, *_ = make_app(tmp_path, [[done()], HIJACK], approval_timeout_s=0.05)
+    s = app.session(None)
+    run = app.start_run(s, "hijack", background=False)
+    first = run.budget
+    assert first is not None and first.max_tokens == app.token_budget * 2
+    assert next(e["data"] for e in run.events if e["type"] == "summary")["tokens_used"] == first.used

@@ -26,7 +26,11 @@
   <section class="panel" aria-labelledby="h-task">
     <h2 id="h-task"><span class="num">1</span>Pick a task</h2>
     <div class="scenarios" role="radiogroup" aria-label="Task">
-      <label class="scenario"><input type="radio" name="scenario" value="morning" checked>
+      <label class="scenario"><input type="radio" name="scenario" value="hijack" checked>
+        <span class="s-title">Watch the gate catch a hijack</span>
+        <span class="s-sub">"Summarize my inbox." One email hides an order to forward all your mail to a stranger, and
+          the brain's warning is removed so it obeys. You get the approval card. About 30 seconds.</span></label>
+      <label class="scenario"><input type="radio" name="scenario" value="morning">
         <span class="s-title">Morning run</span>
         <span class="s-sub">Two scheduled runs of your triage skill, at 07:00 and 07:15. New mail arrives in between,
           including Sam saying his wallet changed. Each run leaves a brief.</span></label>
@@ -76,7 +80,9 @@
       <label for="injection" class="field-label">Body of the email from security@mail-protect.example</label>
       <textarea id="injection" rows="6" spellcheck="false"></textarea>
       <div class="hint"><span id="inj-count"></span> This text goes into the inbox as an email. The assistant and
-        the reviewer see it as something the assistant read, never as your request.</div>
+        the reviewer see it as something the assistant read, never as your request. Asking it to pay someone new
+        won't reach the gate: payments go only to wallets saved in your memory, and that rule runs first. To see the
+        gate decide, ask it to <em>send an email</em>.</div>
     </div>
 
     <label class="toggle">

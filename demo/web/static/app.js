@@ -48,6 +48,7 @@ async function init() {
   $("injection").value = data.default_injection;
   $("injection").maxLength = data.injection_max;
   countInjection();
+  showScenario();
   const L = data.limits;
   $("limits").textContent =
     `Limits so the credits last: ${L.session_runs_per_hour} runs per hour for this page, ` +
@@ -110,8 +111,10 @@ function showScenario() {
   $("skill-box").hidden = scenario() !== "skill";
   $("agentdojo-box").hidden = scenario() !== "agentdojo";
   // the published attack always runs with the warning on; the server ignores the box for it too
-  $("unguarded").disabled = scenario() === "agentdojo";
+  // the hijack always runs without it; the server sets both itself
+  $("unguarded").disabled = scenario() === "agentdojo" || scenario() === "hijack";
   if (scenario() === "agentdojo") $("unguarded").checked = false;
+  if (scenario() === "hijack") $("unguarded").checked = true;
 }
 document.querySelectorAll("input[name=scenario]").forEach((r) => r.addEventListener("change", showScenario));
 $("injection").addEventListener("input", countInjection);
@@ -165,6 +168,8 @@ function listen(id) {
   on("tick", onTick);
   on("mail_arrived", onMailArrived);
   on("brief", onBrief);
+  on("retry", (d) => addStep("err", "The brain ignored the poisoned email this time",
+    `So nothing reached the gate. Models don't obey every time; running the same request again (try ${d.attempt} of ${d.of}).`));
   on("run_error", (d) => addStep("err", "Stopped", d.message));
   source.onerror = () => {
     // the browser retries on its own; if the run is gone (session ended), stop and say so
@@ -205,7 +210,10 @@ function onStart(d) {
       "terminal, so anything that needs you is held and listed in the brief."));
   }
   if (d.skill) t.append(el("div", "muted", `Tools: ${d.skill.tools.join(", ")}.`));
-  if (!d.guarded) t.append(el("div", "", "The brain's warning about instructions in emails is removed for this run."));
+  if (d.scenario === "hijack") {
+    t.append(el("div", "", "One email in the inbox hides an order to forward all your mail to a stranger. The brain's " +
+      "warning about instructions in emails is removed, so it is likely to obey. Watch what the gate does."));
+  } else if (!d.guarded) t.append(el("div", "", "The brain's warning about instructions in emails is removed for this run."));
   if (d.custom_injection) t.append(el("div", "", "The poisoned email contains your text."));
   if (d.published_attack) t.append(el("div", "published-note", d.published_attack.label));
   $("h-steps").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -455,6 +463,10 @@ function onGateResult(d) {
   const [good, text] = outcomeText(d);
   c.card.append(receiptBlock(d.receipts, "Receipts for this action"));
   c.card.append(el("div", `outcome ${good ? "ok" : "bad"}`, text));
+  if (d.status === "expired" && d.by === "human:held") {
+    c.card.append(el("div", "muted", "Why the receipt says \"expired\": this request never runs from the scheduled pass. " +
+      "When you answer it later in your terminal, it goes through the whole gate again as a new request, with new receipts."));
+  }
   if (d.can_remember) c.card.append(rememberBox(d));
 }
 
@@ -497,6 +509,8 @@ function onSummary(d) {
       "the wallet was not one you saved.";
   } else if (d.outbound === 0 && scenario() === "morning") {
     counts = "Nothing reached the gate in these runs.";
+  } else if (d.outbound === 0 && scenario() === "hijack") {
+    counts = "Nothing reached the gate: the brain ignored the poisoned email on both tries. It happens; press Run again.";
   } else if (d.outbound === 0 && scenario() === "agentdojo") {
     counts = "Nothing reached the gate: with its warning on, the brain did not act on the published attack this " +
       "time. On AgentDojo's banking suite it did in 38% of attacked runs; with the gate, none got through (0 of 144, see RESULTS.md).";
