@@ -6,7 +6,8 @@
   homestead-gate watch                                         the receipts (same as `hsm watch`)
   homestead-gate run --allow-host api.anthropic.com -- claude   the agent, sandboxed; the gate is its only way out
   homestead-gate mcp                                           MCP tools for your agent (claude mcp add homestead-gate -- homestead-gate mcp)
-  homestead-gate assistant --backend nim --skill pay           the personal assistant demo: cloud brain, local gate
+  homestead-gate assistant --skill triage                      the personal assistant: cloud brain, local gate
+  homestead-gate assistant --watch --every 15m                 always-on: new mail on a schedule, a brief, a notification
 """
 from __future__ import annotations
 
@@ -415,9 +416,112 @@ class _NoModelReviewer:
 ASSISTANT_REVIEWER = "nemotron-3-nano:4b"
 
 
+def _assistant_data(a) -> Path:
+    return Path(a.data).expanduser() if a.data else HOME / "assistant"
+
+
+def _assistant_seed(a, data: Path) -> None:
+    from . import assistant as asst
+    from .skills import ensure_skills_file
+    if asst.seed(data, model=a.model or ASSISTANT_REVIEWER):
+        print(f"seeded demo data (fake inbox, bills, memory, policy, skills) in {data}")
+    elif ensure_skills_file(data):
+        print(f"wrote the default skills to {data / 'skills.toml'}")
+
+
+def _assistant_reviewer(a, policy):
+    """The local reviewer, or None if it does not fit this machine. --no-model loads nothing."""
+    if a.no_model:
+        return _NoModelReviewer()
+    hw = hardware.detect()
+    if not _fits(policy.model, hw, hardware.pick_reviewer(hw)):
+        return None
+    return OllamaReviewer(policy.model, policy.ollama_url, policy.review_timeout_s)
+
+
+def _offer_remember(memory, done: list[tuple[dict, dict]]) -> None:
+    """After you approved an action to someone new, offer to remember them. Written as YOUR fact,
+    with the source "approved by you on <date>", so next time it counts as a known contact."""
+    from . import assistant as asst
+    known = memory.contacts()
+    for action, res in done:
+        to = str(action.get("to") or "")
+        if (res.get("status") != "executed" or not str(res.get("by", "")).startswith("human:")
+                or not to or to.lower() in known):
+            continue
+        field = "wallet" if action.get("type") == "wallet_tx" else "email"
+        name = _ask(f"remember {to} as someone's {field} for next time? type their name (blank to skip): ")
+        if name:
+            memory.remember_from_user(name, field, to, source=asst.approved_source())
+            known[to.lower()] = {}
+            print(f"  remembered: {name}, {field}: {to} ({asst.approved_source()})")
+
+
+def _print_facts(memory) -> None:
+    facts = memory.all_facts()
+    if not facts:
+        print("memory is empty")
+    for f in facts:
+        who = "you" if f["written_by"] == "user" else (f["written_by"] or "unknown (edited by hand?)")
+        print(f"  {f['entity']}, {f['field']}: {f['value']}")
+        print(f"      written by {who}" + (f" at {str(f['at'])[:16].replace('T', ' ')}" if f["at"] else "")
+              + f"; source: {f['source']}")
+
+
 def cmd_assistant(a) -> int:
+    from . import always_on
     from . import assistant as asst
     from .llm import ChatClient, LLMError
+    from .skills import SkillError, load_skills, parse_interval
+
+    data = _assistant_data(a)
+    # ---- things that need no cloud model and no API key
+    if a.memory or a.remember or a.skills or a.demo_new_mail or a.pending:
+        _assistant_seed(a, data)
+        memory = asst.AssistantMemory(data / "memory")
+        if a.remember:
+            entity, field, value = a.remember
+            r = memory.remember_from_user(entity, field, value)
+            print(f"remembered ({r['action']}): {entity}, {r['field']}: {r['value']}, written by you")
+        if a.demo_new_mail:
+            for m in asst.deliver_later_mail(data):
+                print(f"new mail: {m['id']} from {m['from']}: {m['subject']}")
+        if a.skills:
+            try:
+                skills = load_skills(data)
+            except SkillError as e:
+                print(f"assistant: {e}", file=sys.stderr)
+                return 2
+            for s in skills.values():
+                print(f"  {s.name}{' (' + s.schedule + ')' if s.schedule else ''}: \"{s.instruction}\"")
+                print(f"      tools: {', '.join(s.tools)}")
+            print(f"edit them in {data / 'skills.toml'}")
+        if a.memory:
+            _print_facts(memory)
+        if a.pending:
+            items = always_on.load_pending(data)
+            if not items:
+                print("nothing is waiting for you")
+                return 0
+            print(f"{len(items)} held for you. Each goes through the whole gate again (policy and reviewer; it asks you whenever the gate would).")
+            policy = asst.load_policy(data, memory)
+            if a.model:
+                policy.model = a.model
+            reviewer = _assistant_reviewer(a, policy)
+            if reviewer is None:
+                return 1
+            approver = TerminalApprover(override_delay_s=policy.override_delay_s, timeout_s=policy.approval_timeout_s)
+
+            def fresh():
+                p = asst.load_policy(data, memory)
+                if a.model:
+                    p.model = a.model
+                return p
+            results = always_on.resolve_pending(data, policy_factory=fresh, reviewer=reviewer, approver=approver)
+            for r in results:
+                print(f"  -> {r['result'].get('status')}" + (f" by {r['result']['by']}" if r["result"].get("by") else ""))
+            _offer_remember(memory, [(r["item"].get("action") or {}, r["result"]) for r in results])
+        return 0
 
     try:
         llm = ChatClient.from_preset(a.backend, base_url=a.base_url, model=a.llm_model)
@@ -427,28 +531,68 @@ def cmd_assistant(a) -> int:
         return 2
     if a.smoke:
         return _assistant_smoke(llm)
-    task = a.task or asst.SKILLS.get(a.skill or "")
+
+    _assistant_seed(a, data)
+    try:
+        skills = load_skills(data)
+    except SkillError as e:
+        print(f"assistant: {e}", file=sys.stderr)
+        return 2
+    skill_name = a.skill or ("triage" if a.watch else None)
+    skill = skills.get(skill_name) if skill_name else None
+    if skill_name and skill is None:
+        print(f"assistant: no skill {skill_name!r} in {data / 'skills.toml'} (have: {', '.join(skills)})",
+              file=sys.stderr)
+        return 2
+    task = a.task or (skill.instruction if skill else None)
     if not task:
-        print("assistant: give --task \"...\" or --skill triage|pay|summarize", file=sys.stderr)
+        print(f"assistant: give --task \"...\" or --skill {'|'.join(skills)}", file=sys.stderr)
+        return 2
+    if a.task and a.watch:
+        print("assistant: --watch runs a skill; give --skill, not --task", file=sys.stderr)
         return 2
 
-    data = Path(a.data).expanduser() if a.data else HOME / "assistant"
-    # The assistant's local reviewer defaults to NVIDIA's Nemotron 3 Nano 4B (GateBench v0.1: 30/30
-    # attacks caught, 3/30 legit blocked; 2/30 with known contacts), so brain and reviewer are both
-    # NVIDIA open models. The gate on its own still picks a reviewer by hardware (`up`).
-    hw = hardware.detect()
-    pick = hardware.pick_reviewer(hw)
-    if asst.seed(data, model=a.model or ASSISTANT_REVIEWER):
-        print(f"seeded demo data (fake inbox, bills, memory, policy) in {data}")
-    policy = Policy.load(data / "policy.toml")
+    memory = asst.AssistantMemory(data / "memory")
+    policy = asst.load_policy(data, memory)
     if a.model:
         policy.model = a.model
-    if a.no_model:
-        reviewer = _NoModelReviewer()
-    else:
-        if not _fits(policy.model, hw, pick):
-            return 1
-        reviewer = OllamaReviewer(policy.model, policy.ollama_url, policy.review_timeout_s)
+    reviewer = _assistant_reviewer(a, policy)
+    if reviewer is None:
+        return 1
+    print(f"task (from you): {task}" + (f"   [skill {skill.name}]" if skill and not a.task else ""))
+    print(f"  brain:    {llm.model} via {a.backend} (cloud)")
+    print(f"  reviewer: {'none, every action asks you (--no-model)' if a.no_model else policy.model + ' (local)'}")
+    print(f"  memory:   {data / 'memory'}  ({len(memory.contacts())} contacts you wrote)")
+    print(f"  receipts: {data / 'ledger'}  (homestead-gate watch --ledger {data / 'ledger'})")
+
+    if a.watch:
+        if a.live:
+            print("assistant: --watch never sends live email; approve held items with --pending", file=sys.stderr)
+            return 2
+        try:
+            every = parse_interval(a.every or skill.schedule or "15m")
+        except SkillError as e:
+            print(f"assistant: {e}", file=sys.stderr)
+            return 2
+        print(f"  watching: skill {skill.name} " + ("once" if a.once else f"every {every}s") +
+              f"; anything that needs you is held (see it with: homestead-gate assistant --pending)")
+        n = 0
+        while True:
+            p = always_on.run_pass(data, skill, llm=llm, reviewer=reviewer, guard_prompt=not a.unguarded_prompt,
+                                   max_steps=a.max_steps, log=print)
+            n += 1
+            if p.skipped:
+                print(f"[{p.at}] skipped: {p.skipped}")
+            else:
+                print(f"[{p.at}] {always_on._counts(p)}. brief: {p.brief_path}")
+            if a.once or (a.max_passes and n >= a.max_passes):
+                return 1 if p.error else 0
+            try:
+                _sleep(every)
+            except KeyboardInterrupt:
+                print("\nstopped.")
+                return 0
+
     smtp = None
     if a.live:
         smtp, rc = _live_smtp(policy)
@@ -461,22 +605,24 @@ def cmd_assistant(a) -> int:
                                           timeout_s=policy.approval_timeout_s),
                 ledger_dir=ledger_dir, task=task, session=secrets.token_hex(4),
                 outbox=data / "outbox", smtp=smtp, live=smtp is not None)
-    print(f"task (from you): {task}")
-    print(f"  brain:    {llm.model} via {a.backend} (cloud)")
-    print(f"  reviewer: {'none, every action asks you (--no-model)' if a.no_model else policy.model + ' (local)'}")
-    print(f"  memory:   {data / 'memory'}")
-    print(f"  receipts: {ledger_dir}  (homestead-gate watch --ledger {ledger_dir})")
     print(f"  autonomous wallet spending so far today: {spent:g} of {policy.daily_auto_value_eth:g} ETH")
     print("  email is LIVE" if smtp else f"  email is DRY-RUN: approved messages land in {data / 'outbox'}")
-    bot = asst.Assistant(llm=llm, submit=gate.submit, data_dir=data, memory=asst.AssistantMemory(data / "memory"),
-                         task=task, max_steps=a.max_steps, guard_prompt=not a.unguarded_prompt, log=print)
+    bot = asst.Assistant(llm=llm, submit=gate.submit, data_dir=data, memory=memory, task=task,
+                         max_steps=a.max_steps, guard_prompt=not a.unguarded_prompt,
+                         tools=skill.tools if skill and not a.task else None, log=print)
     try:
         out = bot.run()
     except LLMError as e:
         print(f"assistant: the cloud model failed: {e}", file=sys.stderr)
         return 1
     print("\n" + (out["final"] or "(no answer)"))
+    _offer_remember(memory, [(r["action"], r["result"]) for r in out["requests"]])
     return 0
+
+
+def _sleep(secs: float) -> None:
+    import time as _t
+    _t.sleep(secs)
 
 
 def _assistant_smoke(llm) -> int:
@@ -555,8 +701,20 @@ def main(argv=None) -> int:
     asp = sub.add_parser("assistant", help="personal assistant demo: a cloud model plans, every send goes through the gate")
     asp.add_argument("--backend", choices=("nim", "tokenfactory"), default="tokenfactory")
     asp.add_argument("--task", help="what you want done; the reviewer trusts only this")
-    asp.add_argument("--skill", choices=("triage", "pay", "summarize"), help="a demo task instead of --task")
-    asp.add_argument("--data", help="demo data dir: fake inbox, bills, memory, policy, receipts (default ~/.homestead-gate/assistant)")
+    asp.add_argument("--skill", help="a skill from the data dir's skills.toml (defaults: triage, pay, summarize)")
+    asp.add_argument("--skills", action="store_true", help="list your skills (skills.toml) and exit")
+    asp.add_argument("--data", help="demo data dir: fake inbox, bills, memory, policy, skills, receipts (default ~/.homestead-gate/assistant)")
+    asp.add_argument("--watch", action="store_true",
+                     help="always-on: run a skill (default triage) over NEW mail on a schedule, leave a brief")
+    asp.add_argument("--every", help="with --watch: how often, e.g. 15m or 1h (default: the skill's schedule, else 15m)")
+    asp.add_argument("--once", action="store_true", help="with --watch: one pass, then exit (for launchd or cron)")
+    asp.add_argument("--max-passes", type=int, default=0, help=argparse.SUPPRESS)
+    asp.add_argument("--pending", action="store_true",
+                     help="approve or deny, in this terminal, what scheduled runs held for you")
+    asp.add_argument("--memory", action="store_true", help="list what the assistant remembers, with who wrote each fact")
+    asp.add_argument("--remember", nargs=3, metavar=("NAME", "FIELD", "VALUE"),
+                     help="save a fact as yours, e.g. --remember \"Sam Rivera\" wallet 0x...")
+    asp.add_argument("--demo-new-mail", action="store_true", help="deliver the demo's later mail into the fake inbox")
     asp.add_argument("--smoke", action="store_true", help="one live call to the backend with one tool, then exit")
     asp.add_argument("--base-url", help="override the backend's base URL")
     asp.add_argument("--llm-model", help="override the backend's model")
