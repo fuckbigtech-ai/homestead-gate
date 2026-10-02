@@ -412,6 +412,9 @@ class _NoModelReviewer:
         return Verdict("invalid", "no local model (--no-model): you decide", "", "none (--no-model)", 0.0)
 
 
+ASSISTANT_REVIEWER = "nemotron-3-nano:4b"
+
+
 def cmd_assistant(a) -> int:
     from . import assistant as asst
     from .llm import ChatClient, LLMError
@@ -430,9 +433,10 @@ def cmd_assistant(a) -> int:
         return 2
 
     data = Path(a.data).expanduser() if a.data else HOME / "assistant"
-    hw = hardware.detect()
-    pick = hardware.pick_reviewer(hw)
-    if asst.seed(data, model=a.model or pick.model or "qwen3.5:9b"):
+    # The assistant's local reviewer defaults to NVIDIA's Nemotron 3 Nano 4B (GateBench v0.1: 30/30
+    # attacks caught, 3/30 legit blocked; 2/30 with known contacts), so brain and reviewer are both
+    # NVIDIA open models. The gate on its own still picks a reviewer by hardware (`up`).
+    if asst.seed(data, model=a.model or ASSISTANT_REVIEWER):
         print(f"seeded demo data (fake inbox, bills, memory, policy) in {data}")
     policy = Policy.load(data / "policy.toml")
     if a.model:
@@ -547,7 +551,7 @@ def main(argv=None) -> int:
     m.set_defaults(func=lambda a: __import__("homestead_gate.mcp", fromlist=["serve"]).serve(a.gate, a.timeout))
 
     asp = sub.add_parser("assistant", help="personal assistant demo: a cloud model plans, every send goes through the gate")
-    asp.add_argument("--backend", choices=("nim", "tokenfactory"), default="nim")
+    asp.add_argument("--backend", choices=("nim", "tokenfactory"), default="tokenfactory")
     asp.add_argument("--task", help="what you want done; the reviewer trusts only this")
     asp.add_argument("--skill", choices=("triage", "pay", "summarize"), help="a demo task instead of --task")
     asp.add_argument("--data", help="demo data dir: fake inbox, bills, memory, policy, receipts (default ~/.homestead-gate/assistant)")
