@@ -55,7 +55,7 @@ class WebApprover:
         try:
             self.on_ask({"rid": rid, "action": action, "flagged": bool(flagged),
                          "review_reason": review_reason, "span": span,
-                         "timeout_s": self.timeout_s,
+                         "timeout_s": self.timeout_s, "deadline": time.time() + self.timeout_s,
                          "override_delay_s": self.override_delay_s if flagged else 0})
         except Exception:  # noqa: BLE001 - a broken page must not turn into a yes
             pass

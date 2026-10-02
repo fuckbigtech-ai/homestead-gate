@@ -42,7 +42,7 @@ from homestead_gate.llm import LLMError
 from homestead_gate.policy import Policy
 
 from .approver import WebApprover
-from .reviewers import BudgetTransport, make_brain, make_reviewer, reviewer_kind, reviewer_label
+from .reviewers import BudgetTransport, make_brain, make_reviewer, reviewer_kind, reviewer_label, reviewer_model
 
 STATIC = Path(__file__).parent / "static"
 COOKIE = "hg_demo"
@@ -257,7 +257,13 @@ class App:
             if s or not create:
                 return s
             if len(self.sessions) >= self.max_sessions:
-                raise LimitError("The demo is full right now. Try again in a few minutes.", 503)
+                # Make room by dropping the oldest session that never ran anything; sessions that
+                # hold receipts are kept until their hour is up.
+                idle = min((x for x in self.sessions.values() if not x.runs), key=lambda x: x.created, default=None)
+                if idle is None:
+                    raise LimitError("The demo is full right now. Try again in a few minutes.", 503)
+                del self.sessions[idle.id]
+                self._remove(idle.dir)
             sid = secrets.token_urlsafe(18)
             s = Session(sid, self.root, self.clock(), self.session_runs_per_hour)
             self.sessions[sid] = s
@@ -269,14 +275,18 @@ class App:
         now = self.clock()
         with self.lock:
             old = [s for s in self.sessions.values() if now - s.created >= self.ttl]
-            for s in old:
-                del self.sessions[s.id]
+        removed = 0
         for s in old:
             for r in s.runs.values():
                 if r.approver:
-                    r.approver.close()
+                    r.approver.close()            # waiting cards end as deny, so the run finishes
+            if s.active is not None and not s.active.done:
+                continue                          # removed on a later sweep, once its writes stop
+            with self.lock:
+                self.sessions.pop(s.id, None)
             self._remove(s.dir)
-        return len(old)
+            removed += 1
+        return removed
 
     def _remove(self, path: Path) -> None:
         p = path.resolve()
@@ -304,6 +314,8 @@ class App:
             raise LimitError(f"The injection text is limited to {INJECTION_MAX} characters.", 400)
         now = self.clock()
         with self.lock:
+            if now - s.created >= self.ttl:
+                raise LimitError("This page's session has ended. Reload the page to start again.", 410)
             if s.active is not None and not s.active.done:
                 raise LimitError("A run is already going in this page. Finish it first.", 409)
             if self.running >= self.max_concurrent:
@@ -330,9 +342,9 @@ class App:
         try:
             self._run(s, run, injection, unguarded)
         except LLMError as e:
-            run.emit("error", {"message": f"The cloud model failed: {e}"})
+            run.emit("run_error", {"message": f"The cloud model failed: {e}"})
         except Exception as e:  # noqa: BLE001 - the page must hear about it; nothing executes after
-            run.emit("error", {"message": f"The run stopped: {type(e).__name__}"})
+            run.emit("run_error", {"message": f"The run stopped: {type(e).__name__}"})
         finally:
             with self.lock:
                 self.running -= 1
@@ -552,8 +564,11 @@ def make_handler(app: App):
                     ctype = "text/javascript" if path.endswith(".js") else "text/css"
                     return self._send(200, (STATIC / path.rsplit("/", 1)[1]).read_bytes(), ctype + "; charset=utf-8")
                 if path == "/api/config":
-                    self._session()
+                    s = self._session(create=False)       # a session starts with the first run
+                    active = s.active if s and s.active and not s.active.done else None
                     return self._json(200, {
+                        "active_run": active.id if active else None,
+                        "reviewer_model": reviewer_model(),
                         "brain": app.brain_label(), "reviewer": reviewer_label(),
                         "reviewer_kind": reviewer_kind(),
                         "scenarios": {k: v for k, v in SCENARIOS.items()},

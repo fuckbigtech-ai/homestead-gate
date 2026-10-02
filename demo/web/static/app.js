@@ -32,10 +32,10 @@ async function init() {
   const { data } = await api("/api/config");
   config = data;
   const reviewerSentence = data.reviewer_kind === "tokenfactory"
-    ? "the reviewer runs on Nebius Token Factory (Nemotron Nano 30B) so you don't need a GPU"
+    ? `the reviewer runs on Nebius Token Factory (${data.reviewer_model}) so you don't need a GPU`
     : `the reviewer is ${data.reviewer}`;
   $("demo-text").textContent =
-    `The approval happens in this page and ${reviewerSentence}. In the product, the reviewer runs on your ` +
+    `the approval happens in this page and ${reviewerSentence}. In the product, the reviewer runs on your ` +
     "own machine and approval happens only in the terminal you started the gate in; there is no approve " +
     "button on the network.";
   const m = $("models");
@@ -49,6 +49,14 @@ async function init() {
     `Limits so the credits last: ${L.session_runs_per_hour} runs per hour for this page, ` +
     `${L.global_runs_per_hour} per hour for everyone, ${L.token_budget.toLocaleString()} tokens per run. ` +
     `An approval card waits ${L.approval_timeout_s} seconds, then counts as a no.`;
+  if (data.active_run) {
+    // a reload while a run is going: pick it up again; the stream replays from the start
+    runId = data.active_run;
+    $("run").disabled = true;
+    $("run-status").textContent = "Your run is still going. Picked it up again.";
+    resetTimeline();
+    listen(runId);
+  }
 }
 
 function scenario() { return document.querySelector("input[name=scenario]:checked").value; }
@@ -101,7 +109,14 @@ function listen(id) {
   on("approval", onApproval);
   on("gate_result", onGateResult);
   on("summary", onSummary);
-  on("error", (d) => addStep("err", "Stopped", d.message));
+  on("run_error", (d) => addStep("err", "Stopped", d.message));
+  source.onerror = () => {
+    // the browser retries on its own; if the run is gone (session ended), stop and say so
+    if (source.readyState === EventSource.CLOSED) {
+      $("run").disabled = false;
+      $("run-status").textContent = "Lost the connection to this run. Reload the page.";
+    }
+  };
   on("end", () => {
     source.close();
     $("run").disabled = false;
@@ -238,9 +253,10 @@ function onApproval(d) {
   $("timeline").append(li);
   card.scrollIntoView({ behavior: "smooth", block: "center" });
 
-  const started = Date.now();
+  const deadline = d.deadline * 1000;
+  const started = deadline - d.timeout_s * 1000;     // when the card was first shown
   const tick = setInterval(() => {
-    const left = Math.max(0, d.timeout_s - Math.floor((Date.now() - started) / 1000));
+    const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
     timer.textContent = `${left}s left, then it counts as a no`;
     if (left <= 0) clearInterval(tick);
   }, 500);

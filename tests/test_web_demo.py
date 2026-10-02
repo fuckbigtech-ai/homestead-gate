@@ -211,7 +211,7 @@ def test_custom_injection_does_not_leak_into_the_next_run(tmp_path):
 def test_rate_limit_per_session_and_global(tmp_path):
     clock = Clock()
     app, *_ = make_app(tmp_path, [[done()]] * 20, clock=clock, session_runs_per_hour=2,
-                       global_runs_per_hour=3)
+                       global_runs_per_hour=3, session_ttl_s=10_000)
     a, b = app.session(None), app.session(None)
     app.start_run(a, "pay", background=False)
     app.start_run(a, "pay", background=False)
@@ -249,12 +249,44 @@ def test_bad_input_is_refused(tmp_path):
     assert not s.window.times
 
 
-def test_session_cap(tmp_path):
-    app, *_ = make_app(tmp_path, [], max_sessions=2)
-    app.session(None), app.session(None)
-    with pytest.raises(srv.LimitError) as e:
+def test_session_cap_evicts_idle_sessions_first(tmp_path):
+    app, *_ = make_app(tmp_path, [[done()], [done()]], max_sessions=2)
+    a, idle = app.session(None), app.session(None)
+    app.start_run(a, "pay", background=False)
+    c = app.session(None)                          # full: the idle one makes room
+    assert app.session(idle.id, create=False) is None and app.session(a.id, create=False) is a
+    app.start_run(c, "pay", background=False)
+    with pytest.raises(srv.LimitError) as e:       # full of sessions that hold receipts
         app.session(None)
     assert e.value.status == 503
+
+
+def test_sweep_waits_for_a_running_run_and_ends_its_card(tmp_path):
+    clock = Clock()
+    app, *_ = make_app(tmp_path, [HIJACK], clock=clock)
+    s = app.session(None)
+    run = app.start_run(s, "summarize", unguarded=True)
+    while not any(e["type"] == "approval" for e in run.events):
+        time.sleep(0.01)
+    clock.t += 3600
+    assert app.sweep() == 0                        # the card is closed to deny; the dir stays for now
+    for _ in range(300):
+        if run.done:
+            break
+        time.sleep(0.01)
+    res = next(e["data"] for e in run.events if e["type"] == "gate_result")
+    assert res["status"] == "denied"
+    assert app.sweep() == 1 and not s.dir.exists()
+
+
+def test_an_expired_session_cannot_start_runs(tmp_path):
+    clock = Clock()
+    app, *_ = make_app(tmp_path, [], clock=clock)
+    s = app.session(None)
+    clock.t += 3600
+    with pytest.raises(srv.LimitError) as e:
+        app.start_run(s, "pay")
+    assert e.value.status == 410
 
 
 def test_token_budget_stops_the_run(tmp_path):
@@ -266,7 +298,7 @@ def test_token_budget_stops_the_run(tmp_path):
         if run.done:
             break
         time.sleep(0.01)
-    err = next(e["data"]["message"] for e in run.events if e["type"] == "error")
+    err = next(e["data"]["message"] for e in run.events if e["type"] == "run_error")
     assert "token budget" in err and KEY not in err
     assert sum(e["type"] == "thinking" for e in run.events) == 2   # the second call was refused
 
@@ -431,8 +463,10 @@ def test_page_renders_untrusted_text_as_text():
 def test_demo_mode_is_labelled():
     html = (REPO / "demo" / "web" / "static" / "index.html").read_text()
     js = (REPO / "demo" / "web" / "static" / "app.js").read_text()
-    assert "Demo mode." in html
-    assert "Nebius Token Factory (Nemotron Nano 30B) so you don't need a GPU" in js
+    assert "<strong>Demo mode:</strong>" in html
+    assert "the approval happens in this page and" in js
+    assert "Nebius Token Factory (${data.reviewer_model}) so you don't need a GPU" in js
+    assert rv_mod.reviewer_model() == "Nemotron Nano 30B"
     assert "there is no approve \" +\n    \"button on the network" in js
 
 
@@ -455,14 +489,15 @@ def test_http_end_to_end(tmp_path):
 
     try:
         st, h, _ = req("GET", "/api/config")
+        assert st == 200 and "Set-Cookie" not in h and not app.sessions   # loading the page costs nothing
+        assert req("POST", "/api/run", {"scenario": "summarize"}, {"Origin": "http://evil.example"})[0] == 403
+        assert req("POST", "/api/run", {"scenario": "summarize"}, {"Content-Type": "text/plain"})[0] == 415
+        st, h, body = req("POST", "/api/run", {"scenario": "summarize", "unguarded": True})
         cookie = h["Set-Cookie"].split(";")[0]
-        assert st == 200 and "HttpOnly" in h["Set-Cookie"] and "SameSite=Strict" in h["Set-Cookie"]
-        assert req("POST", "/api/run", {"scenario": "summarize"},
-                   {"Cookie": cookie, "Origin": "http://evil.example"})[0] == 403
-        assert req("POST", "/api/run", {"scenario": "summarize"},
-                   {"Cookie": cookie, "Content-Type": "text/plain"})[0] == 415
-        st, _, body = req("POST", "/api/run", {"scenario": "summarize", "unguarded": True}, {"Cookie": cookie})
+        assert "HttpOnly" in h["Set-Cookie"] and "SameSite=Strict" in h["Set-Cookie"]
         run_id = json.loads(body)["run_id"]
+        # a reload finds the run that is still going
+        assert json.loads(req("GET", "/api/config", headers={"Cookie": cookie})[2])["active_run"] == run_id
         c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
         c.request("GET", f"/api/runs/{run_id}/events", headers={"Cookie": cookie})
         stream = c.getresponse()

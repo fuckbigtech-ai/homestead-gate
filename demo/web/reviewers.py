@@ -121,6 +121,17 @@ def reviewer_kind() -> str:
     return (os.environ.get("DEMO_REVIEWER") or "tokenfactory").strip().lower()
 
 
+def reviewer_model() -> str:
+    """The reviewer model's name as the demo banner should say it."""
+    k = reviewer_kind()
+    if k == "ollama":
+        return os.environ.get("DEMO_OLLAMA_MODEL") or OLLAMA_DEFAULT_MODEL
+    if k == "scripted":
+        return "no model"
+    m = os.environ.get("DEMO_TF_REVIEWER_MODEL") or TF_REVIEWER_MODEL
+    return "Nemotron Nano 30B" if m == TF_REVIEWER_MODEL else m
+
+
 def reviewer_label() -> str:
     """What the page says the reviewer is. Must name the model actually running."""
     k = reviewer_kind()
