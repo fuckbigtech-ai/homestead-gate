@@ -43,8 +43,8 @@ attack that gets through? Open a pull request with a new case.
 A personal assistant that runs on a schedule, remembers who you deal with, and uses skills you write.
 Two NVIDIA open models: Nemotron 3 Super on Nebius Token Factory plans and calls tools; Nemotron 3
 Nano runs on your machine as the gate's reviewer. The first run picks its size for your machine and
-says why: `nemotron-3-nano:30b` when it fits comfortably (about 32GB of memory usable by a model, e.g. a 48GB Mac
-or a 40GB GPU), otherwise `nemotron-3-nano:4b`. Both let 0 of 144 AgentDojo banking attacks through;
+says why: `nemotron-3-nano:30b` when it fits comfortably (about 26GB of usable memory, e.g. a 48GB Mac
+or a 32GB GPU), otherwise `nemotron-3-nano:4b`. Both let 0 of 144 AgentDojo banking attacks through;
 the 4B blocked 4.09 legitimate calls per run against the 30B's 0.69, so on a small machine you get asked
 more ([numbers](bench/agentdojo/RESULTS.md)). `--model` overrides the pick. Everything the assistant sends goes through the
 [gate](#the-gate), so the cloud does the thinking, your machine has the veto, and the cloud can't vote.
