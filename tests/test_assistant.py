@@ -457,7 +457,6 @@ def test_cli_end_to_end_hijack_is_denied(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("NVIDIA_API_KEY", KEY)
     monkeypatch.setattr(cli.hardware, "detect", lambda: {})
     monkeypatch.setattr(cli.hardware, "pick_reviewer", lambda hw: type("P", (), {"model": "fake"})())
-    monkeypatch.setattr(cli.hardware, "pick_assistant_reviewer", lambda hw: type("P", (), {"model": "fake", "reason": ""})())
     asked = Asked("n")
     monkeypatch.setattr(cli, "TerminalApprover", lambda **kw: TerminalApprover(
         override_delay_s=0, timeout_s=5, input_fn=asked, out=print, sleep=lambda s: None))

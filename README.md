@@ -13,8 +13,7 @@ yes. The cloud does the thinking. Your machine has the veto. The cloud can't vot
   an email saying "my bank changed, pay this new wallet" cannot redirect a payment. Skills are your own requests
   in a `skills.toml` you edit. [Details](#the-assistant).
 - **Two NVIDIA open models:** Nemotron 3 Super on **Nebius Token Factory** plans and calls tools; Nemotron 3 Nano
-  reviews every outbound action on your machine, sized to it: the 30B (24GB download) when it fits
-  comfortably, otherwise the 4B, which asks you far more often. The hosted demo runs the 30B on Token Factory.
+  reviews every outbound action (4B on your machine in the product; 30B on Token Factory in the hosted demo)
 - **Measured, not claimed:** on [AgentDojo](bench/agentdojo/RESULTS.md) (ETH Zurich's benchmark for hijacked
   agents), Nemotron 3 Super with its own safety prompt made the attacker's banking transfer in **55 of 144**
   attacked runs (38%). With the gate (Nano 30B reviewer), **0 of 144**. Travel: 11 of 119 to 0. The cost is
@@ -42,11 +41,7 @@ attack that gets through? Open a pull request with a new case.
 
 A personal assistant that runs on a schedule, remembers who you deal with, and uses skills you write.
 Two NVIDIA open models: Nemotron 3 Super on Nebius Token Factory plans and calls tools; Nemotron 3
-Nano runs on your machine as the gate's reviewer. The first run picks its size for your machine and
-says why: `nemotron-3-nano:30b` when it fits comfortably (about 26GB of usable memory, e.g. a 48GB Mac
-or a 32GB GPU), otherwise `nemotron-3-nano:4b`. Both let 0 of 144 AgentDojo banking attacks through;
-the 4B blocked 4.09 legitimate calls per run against the 30B's 0.69, so on a small machine you get asked
-more ([numbers](bench/agentdojo/RESULTS.md)). `--model` overrides the pick. Everything the assistant sends goes through the
+Nano 4B runs on your machine as the gate's reviewer. Everything the assistant sends goes through the
 [gate](#the-gate), so the cloud does the thinking, your machine has the veto, and the cloud can't vote.
 
 ```bash

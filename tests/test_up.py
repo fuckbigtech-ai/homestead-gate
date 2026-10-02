@@ -347,25 +347,3 @@ def test_sandbox_backend_by_os():
     assert installer.sandbox_backend("darwin", lambda n: "/usr/bin/sandbox-exec") == (True, "sandbox-exec")
     assert installer.sandbox_backend("darwin", lambda n: None)[0] is False
     assert installer.sandbox_backend("linux", lambda n: "/x")[0] is False
-
-
-# ---- the assistant's reviewer: both NVIDIA, sized to the machine -------------------------------
-
-def test_assistant_gets_the_30b_when_it_fits_comfortably():
-    p = hardware.pick_assistant_reviewer(mac(48))           # 36GB usable, needs 25.8
-    assert p.model == "nemotron-3-nano:30b" and "0.69" in p.reason
-    assert hardware.pick_assistant_reviewer(nvidia(48)).model == "nemotron-3-nano:30b"
-
-
-def test_assistant_gets_the_4b_below_that_and_says_what_it_costs():
-    for hw in (mac(36), mac(18), mac(8), nvidia(24)):
-        p = hardware.pick_assistant_reviewer(hw)
-        assert p.model == "nemotron-3-nano:4b" and "4.09" in p.reason and "0.69" in p.reason
-
-
-def test_assistant_refuses_when_nothing_fits():
-    assert hardware.pick_assistant_reviewer(mac(4)).model is None
-
-
-def test_gate_pick_is_unchanged_by_the_assistant_pick():
-    assert hardware.pick_reviewer(mac(48)).model == "qwen3.5:9b"
