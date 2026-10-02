@@ -441,8 +441,9 @@ def test_cli_cannot_import_the_web_approver(tmp_path):
 
 def test_web_approver_lives_only_under_demo():
     marker = "class " + "WebApprover"
+    # .claude/ holds other checkouts of this repo (agent worktrees); they are copies, not this tree.
     hits = [p for p in REPO.rglob("*.py") if marker in p.read_text(errors="ignore")
-            and ".venv" not in p.parts]
+            and ".venv" not in p.parts and ".claude" not in p.parts]
     assert hits == [REPO / "demo" / "web" / "approver.py"]
 
 
