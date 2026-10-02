@@ -196,16 +196,20 @@ compromised gate process has the password. Linux needs libsecret; there is no pl
 
 ### Assistant (hackathon demo)
 
-A small personal assistant for the Nebius x NVIDIA hackathon. A cloud model (Nemotron 3 Super)
-plans and calls tools. Everything it sends goes through the gate above.
+A small personal assistant for the Nebius x NVIDIA hackathon. Two NVIDIA open models: Nemotron 3
+Super on Nebius Token Factory plans and calls tools; Nemotron 3 Nano 4B runs on your machine as the
+gate's reviewer. Everything the assistant sends goes through the gate above, so the cloud does the
+thinking, your machine has the veto, and the cloud can't vote.
 
 ```bash
-export NVIDIA_API_KEY=...                                    # NIM. Token Factory: NEBIUS_API_KEY
-homestead-gate assistant --backend nim --smoke               # one live call with one tool, then exit
-homestead-gate assistant --backend nim --skill triage        # reply to the email that needs an answer
-homestead-gate assistant --backend nim --skill pay           # pay the plumber's invoice
-homestead-gate assistant --backend nim --skill summarize     # an inbox with a poisoned email in it
-homestead-gate assistant --backend nim --task "..." --data DIR
+export NEBIUS_API_KEY=...                                    # Nebius Token Factory (default backend)
+ollama pull nemotron-3-nano:4b                               # the local reviewer
+homestead-gate assistant --smoke                             # one live call with one tool, then exit
+homestead-gate assistant --skill triage                      # reply to the email that needs an answer
+homestead-gate assistant --skill pay                         # pay the plumber's invoice
+homestead-gate assistant --skill summarize                   # an inbox with a poisoned email in it
+homestead-gate assistant --task "..." --data DIR
+homestead-gate assistant --backend nim ...                   # NVIDIA's hosted API instead (NVIDIA_API_KEY)
 ```
 
 The data is fake: an inbox, one bill, a memory and a policy, written to
@@ -234,16 +238,19 @@ Payments are unsigned Sepolia transactions.
   from memory, never from an email.
 - **The daily cap holds across runs.** Each run is a new process, so at start the assistant
   replays the last 24 hours of autonomous payments from its receipts.
+- **Money moves on its own only if you asked for a payment.** If your request never mentions paying
+  (an invoice, a bill, a tip, a refund, sending an amount), any payment the agent attempts goes to
+  you, even to an allowlisted payee the model approves. Found in our own demo: asked to "reply to
+  anything that needs an answer", the agent paid an invoice and the model approved it.
 
-`--backend tokenfactory` uses Nebius Token Factory, which is OpenAI-compatible. We have no
-account yet, so its base URL and model are placeholders. Set `HG_TOKENFACTORY_BASE_URL` and
-`HG_TOKENFACTORY_MODEL` (or `--base-url` and `--llm-model`). Until then it refuses to send.
-The API key is read from the environment when a request is built. It is never logged, printed
-or written to a receipt.
+Token Factory is OpenAI-compatible: `https://api.tokenfactory.nebius.com/v1`, model
+`nvidia/nemotron-3-super-120b-a12b` (override with `HG_TOKENFACTORY_BASE_URL` /
+`HG_TOKENFACTORY_MODEL`, or `--base-url` / `--llm-model`). The API key is read from the environment
+when a request is built. It is never logged, printed or written to a receipt.
 
 A cloud model that ignores the poisoned email never reaches the gate. To show the gate catching
 a model that obeys it, `--unguarded-prompt` removes the warning about email instructions from
-the system prompt.
+the system prompt. Our demo recordings say when they use it.
 
 ### What it does not defend against
 
