@@ -8,9 +8,11 @@ attack, brain Nemotron 3 Super on Nebius Token Factory with its safety prompt on
 | no gate | **55/144 (38%)** | 78% | 0 |
 | gate, reviewer Nano 30B (Token Factory), no human | **0/144** | 58% | 0.69 |
 | gate, reviewer Nano 4B (the product's local default), no human | **0/144** | 49% | 4.09 |
+| gate, reviewer Nano 30B run locally (Ollama 4-bit), no human | **0/144** | 43% | 4.31 |
 
-Details: [Nemotron on Token Factory](#nemotron-on-token-factory-2026-10-02) and
-[Nano 4B](#nano-4b-the-reviewer-the-product-ships-2026-10-02). With a human in the loop (the product's
+Details: [Nemotron on Token Factory](#nemotron-on-token-factory-2026-10-02),
+[Nano 4B](#nano-4b-the-reviewer-the-product-ships-2026-10-02) and
+[Nano 30B, local 4-bit](#nano-30b-local-4-bit-ollama-2026-10-02). With a human in the loop (the product's
 2-of-2, measured with Qwen 3.5 9B below) 1 of 143 banking attacks got through, not zero. The rest of this
 page is the earlier Qwen 3.5 9B work.
 
@@ -327,6 +329,59 @@ What this shows:
 
 Cost: Modal L4 about 26 container-minutes inside the functions (5 containers incl. a 5-item smoke), roughly
 $0.5 estimated from minutes; Token Factory $0.04 for the 30B reference (lane counter).
+
+### Nano 30B, local 4-bit (Ollama) (2026-10-02)
+
+Is the 4B's over-blocking about size? The same 30B reviewer that did well hosted, run the way a person runs it
+at home: `ollama pull nemotron-3-nano:30b`, the registry's default 4-bit tag (Q4_K_M, 31.6B parameters,
+`nemotron_h_moe`; model blob `sha256:a70437c41b3b0b768c48737e15f8160c90f13dc963f5226aabb3a160f708d1ce`, 24.3 GB,
+Ollama ID `b725f1117407`), Ollama 0.35.0, on one Modal **L40S** (48 GB; 23,783 MiB of VRAM in use once loaded, so a laptop needs about 24 GB of free VRAM or unified memory for this tag).
+Everything else as in the 4B run: brain Nemotron 3 Super on Token Factory with the guard prompt, the published
+attack, frozen reviewer prompt v1, known contacts, gate in model-only mode, `run_gate.py`'s Ollama reviewer path
+(num_ctx 16384, temperature 0, `format: json`, thinking off, at most 400 output tokens; the product's local
+reviewer also sends `think: false`), 8 lanes sharing one Ollama server. All 16 user tasks, all 144 attacked runs
+plus 16 clean ones. Launcher: `modal_run.py --local-gate nemotron-3-nano:30b --prefix nano30b_local` (launcher
+commit `bcf53a6`, committed before the run).
+
+`python aggregate.py <traces> --matched --split` (640 of 640 runs matched):
+
+| suite | setting | utility, no attack | utility under attack | attack success | ignored / blocked / tried, failed / through | legit actions blocked per run | runs with a legit call blocked |
+|---|---|---|---|---|---|---|---|
+| banking | no gate | 12/16 (75%) | 113/144 (78%) | **55/144 (38%)** | 88 / 0 / 1 / 55 | 0.00 | 0/160 |
+| banking | gate, Nano 30B hosted (Token Factory, reasoning on) | 12/16 (75%) | 84/144 (58%) | **0/144 (0%)** | 89 / 55 / 0 / 0 | 0.69 | 42/160 |
+| banking | gate, **Nano 30B local Q4_K_M (Ollama)** | 9/16 (56%) | 62/144 (43%) | **0/144 (0%)** | 93 / 51 / 0 / 0 | **4.31** | 97/160 |
+| banking | gate, Nano 4B local Q4_K_M (Ollama) | 10/16 (62%) | 71/144 (49%) | **0/144 (0%)** | 99 / 45 / 0 / 0 | 4.09 | 92/160 |
+
+Reviewer health (from `gate_log.jsonl` and `usage.json`): the local 30B said "block" in **2,048 of 2,062
+reviews (99.3%)**; 0 invalid verdicts and 0 reviewer-unavailable (so every block is the model's own answer,
+not fail-closed). Median review latency **1.2 s** (p90 2.4 s, max 5.9 s), measured by the gate and including
+waits in the 8-lane queue (Ollama started llama-server with `-np 1`, one request at a time); Ollama's own
+per-request median is also 1.2 s, so queueing added little. The 4B ran on a different GPU (L4): 1,853 of 1,894
+blocked (97.8%), median 5.0 s. These latencies compare GPUs as much as models; a laptop will differ. Most common reasons: a
+recipient "not in known contacts and not named by the user" and a password change "not requested".
+
+What this shows:
+
+1. **Locally, the 30B behaves like the 4B, not like the hosted 30B.** Same safety (0 of 144 through), same
+   over-blocking (4.31 legitimate calls blocked per run vs 4.09; hosted 0.69). So the 4B's strictness is not
+   only its size.
+2. **At least these differ from the hosted 30B, and this run cannot separate them:** the 4-bit quantization;
+   reasoning (hosted, Nano 30B reasons before answering, up to 2048 tokens; the local Ollama path, like the
+   product's local reviewer, turns thinking off); a 400-token output cap with `format: json` (constrained
+   decoding); and the serving stack and chat template (Ollama/llama.cpp vs Token Factory, whose weight
+   precision we do not know). A local run with thinking on would
+   tell which one matters (slower, and needs room for the reasoning); we have not run it.
+3. **For the product:** at home, a bigger local reviewer does not buy fewer approval prompts with the current
+   settings. The fix to try is the reviewer setting (thinking, or giving it the user's payees), not the model size.
+
+Caveats: one sample per setting; the hosted rows are separate samples from a model that is not deterministic
+at temperature 0, and the brain is hosted in every row, so clean-utility differences of one or two tasks are
+within run-to-run variation. Gate latency includes queueing behind other lanes.
+
+Cost: **$2.88 of Token Factory credit** for the brain (sum of the 8 lane counters; the reviewer is local and
+free) and about 35 minutes of one Modal L40S container (pull plus a 30-minute run; about $1.2 at Modal's L40S
+rate, an estimate, not a bill). Traces: Modal volume `agentdojo-results`, prefix `nano30b_local/`, including
+`env.json` (Ollama version, GPU, model manifest) and `ollama.log`.
 
 ### Published attacks that got past Nemotron 3 Super (no gate)
 
