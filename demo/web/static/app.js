@@ -1,5 +1,6 @@
 // homestead web demo. Everything shown here was written by a model, an email or a visitor, so it
-// is put on the page with textContent only, never as HTML.
+// is put on the page with textContent only, never as HTML. Markdown from the model is turned into
+// DOM nodes by renderMarkdown (md.js), which never parses HTML either.
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -41,6 +42,9 @@ async function init() {
   const m = $("models");
   m.textContent = "";
   m.append("Brain: ", el("b", "", data.brain), ". Reviewer: ", el("b", "", data.reviewer), ".");
+  $("safe-tools").textContent = (data.safe_tools || []).join(", ");
+  $("skill-text").maxLength = data.skill_max || 500;
+  fillSkills(data.skills || []);
   $("injection").value = data.default_injection;
   $("injection").maxLength = data.injection_max;
   countInjection();
@@ -60,12 +64,52 @@ async function init() {
 }
 
 function scenario() { return document.querySelector("input[name=scenario]:checked").value; }
+
+let skills = [];
+function fillSkills(list, pick) {
+  skills = list;
+  const sel = $("skill-pick");
+  const keep = pick || sel.value;
+  sel.textContent = "";
+  for (const k of list) {
+    const o = el("option", "", `${k.name}${k.origin === "yours" ? " (yours)" : ""}`);
+    o.value = k.name;
+    sel.append(o);
+  }
+  if (keep && list.some((k) => k.name === keep)) sel.value = keep;
+  showSkill();
+}
+function showSkill() {
+  const k = skills.find((x) => x.name === $("skill-pick").value);
+  const info = $("skill-info");
+  info.textContent = "";
+  if (!k) return;
+  info.append(el("div", "", `"${k.instruction}"`),
+    el("div", "muted", `Tools: ${k.tools.join(", ")}${k.schedule ? `. Schedule: ${k.schedule}` : ""}.`));
+}
+$("skill-pick").addEventListener("change", showSkill);
+$("skill-save").addEventListener("click", async () => {
+  const st = $("skill-status");
+  st.className = "status";
+  const r = await api("/api/skill", { name: $("skill-name").value, instruction: $("skill-text").value });
+  if (!r.ok) {
+    st.className = "status error";
+    st.textContent = r.data.error || `Not saved (HTTP ${r.status}).`;
+    return;
+  }
+  const name = $("skill-name").value.trim().toLowerCase();
+  fillSkills(r.data.skills, name);
+  st.textContent = `Saved. "${name}" is in your skills.toml for this session. Press Run to use it.`;
+});
 function countInjection() {
   const n = $("injection").value.length;
   $("inj-count").textContent = `${n} of ${config ? config.injection_max : 2000} characters.`;
 }
-document.querySelectorAll("input[name=scenario]").forEach((r) =>
-  r.addEventListener("change", () => { $("custom").hidden = scenario() !== "custom"; }));
+function showScenario() {
+  $("custom").hidden = scenario() !== "custom";
+  $("skill-box").hidden = scenario() !== "skill";
+}
+document.querySelectorAll("input[name=scenario]").forEach((r) => r.addEventListener("change", showScenario));
 $("injection").addEventListener("input", countInjection);
 
 // ---------------------------------------------------------------- run
@@ -77,6 +121,7 @@ $("run").addEventListener("click", async () => {
   $("run").disabled = true;
   const body = { scenario: scenario(), unguarded: $("unguarded").checked };
   if (body.scenario === "custom") body.injection = $("injection").value;
+  if (body.scenario === "skill") body.skill = $("skill-pick").value;
   const r = await api("/api/run", body);
   if (!r.ok) {
     status.className = "status error";
@@ -94,6 +139,9 @@ function resetTimeline() {
   $("timeline").textContent = "";
   $("summary").hidden = true;
   $("summary").textContent = "";
+  $("memory").hidden = true;
+  $("memory").textContent = "";
+  $("task-line").textContent = "Starting...";
   for (const k of Object.keys(cards)) delete cards[k];
 }
 
@@ -109,6 +157,10 @@ function listen(id) {
   on("approval", onApproval);
   on("gate_result", onGateResult);
   on("summary", onSummary);
+  on("memory", onMemory);
+  on("tick", onTick);
+  on("mail_arrived", onMailArrived);
+  on("brief", onBrief);
   on("run_error", (d) => addStep("err", "Stopped", d.message));
   source.onerror = () => {
     // the browser retries on its own; if the run is gone (session ended), stop and say so
@@ -139,11 +191,67 @@ function addStep(cls, what, meta, detail) {
 }
 
 function onStart(d) {
+  // The first thing on screen in every run is what you asked for, never a verdict.
   const t = $("task-line");
   t.textContent = "";
-  t.append("Your request: ", el("b", "", `"${d.task}"`));
+  const label = d.skill ? `Your skill "${d.skill.name}", in your words` : "Your request";
+  t.append(el("div", "block-label", label), el("div", "task", `"${d.task}"`));
+  if (d.scenario === "morning") {
+    t.append(el("div", "", "Two scheduled runs, 07:00 and 07:15, each over only the mail that is new. Nobody is at the " +
+      "terminal, so anything that needs you is held and listed in the brief."));
+  }
+  if (d.skill) t.append(el("div", "muted", `Tools: ${d.skill.tools.join(", ")}.`));
   if (!d.guarded) t.append(el("div", "", "The brain's warning about instructions in emails is removed for this run."));
   if (d.custom_injection) t.append(el("div", "", "The poisoned email contains your text."));
+  $("h-steps").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function onTick(d) {
+  const n = d.new.length;
+  addStep("tick", `${d.at}: scheduled run wakes up`,
+    n ? `${n} new email${n > 1 ? "s" : ""}: ${d.new.map((m) => m.from).join(", ")}` : "No new mail");
+}
+
+function onMailArrived(d) {
+  addStep("", "New mail arrived", d.messages.map((m) => `${m.from}: ${m.subject}`).join(", "));
+}
+
+function onBrief(d) {
+  const li = el("li");
+  const card = el("article", "card brief");
+  const head = el("div", "card-head");
+  head.append(el("span", "card-title", `Brief left at ${d.at}`),
+    el("span", "timer", `${d.done} done, ${d.waiting} waiting for you`));
+  card.append(head);
+  if (d.notification) card.append(el("div", "notif", `Desktop notification: "homestead: ${d.notification}"`));
+  const body = el("div", "md");
+  body.append(renderMarkdown(d.markdown));
+  card.append(body);
+  if (d.waiting) {
+    card.append(el("div", "outcome bad", "In the product, you answer held items in your own terminal with " +
+      "homestead-gate assistant --pending. Each goes through the gate again."));
+  }
+  li.append(card);
+  $("timeline").append(li);
+}
+
+function onMemory(d) {
+  const box = $("memory");
+  box.textContent = "";
+  box.hidden = false;
+  box.append(el("div", "block-label", "Memory it used, and who wrote each fact"));
+  const ul = el("ul", "facts");
+  if (!d.facts.length) ul.append(el("li", "muted", "No facts from memory were used in this run."));
+  for (const f of d.facts) ul.append(factItem(f));
+  box.append(ul, el("div", "hint", "Who to pay comes only from facts you wrote. The assistant cannot write an email " +
+    "address or a wallet into memory, and cannot change a fact you wrote."));
+}
+
+function factItem(f) {
+  const li = el("li", f.written_by === "you" ? "mine" : "");
+  li.append(el("div", "", `${f.entity}, ${f.field}: ${f.value}`),
+    el("div", "meta", `Written by ${f.written_by}${f.when ? ` on ${f.when}` : ""}. Source: ${f.source}`));
+  return li;
 }
 
 function onThinking(d) {
@@ -251,7 +359,10 @@ function onApproval(d) {
   card.append(actions, msg);
   li.append(card);
   $("timeline").append(li);
-  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  // Never jump past the task: bring a waiting card into view after a moment, and only as far as needed.
+  setTimeout(() => {
+    if (card.classList.contains("waiting")) card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, 1500);
 
   const deadline = d.deadline * 1000;
   const started = deadline - d.timeout_s * 1000;     // when the card was first shown
@@ -303,6 +414,9 @@ function outcomeText(d) {
     if (d.action && d.action.type === "wallet_tx") return [true, `Approved by ${who}. Unsigned transaction prepared; nothing was signed or broadcast.`];
     return [true, `Approved by ${who}. Written to the outbox file ${d.result.dry_run || ""}; demo mode never delivers email.`];
   }
+  if (d.status === "expired" && by === "human:held") {
+    return [false, "Held for you. Nothing was sent; it waits in the queue for your yes or no."];
+  }
   if (d.status === "expired") return [false, "No answer in time, so it was not sent. The gate fails closed."];
   if (d.status === "failed") return [false, "Approved, but the action failed. Recorded."];
   return [false, `Not sent. Denied by ${who}.${d.reason && by === "policy" ? " " + d.reason : ""}`];
@@ -315,7 +429,8 @@ function onGateResult(d) {
     const li = el("li");
     const card = el("article", "card");
     const head = el("div", "card-head");
-    head.append(el("span", "card-title", `${describeAction(d.action)}: decided without asking you`));
+    const held = d.status === "expired" && d.by === "human:held";
+    head.append(el("span", "card-title", `${describeAction(d.action)}: ${held ? "held for you" : "decided without asking you"}`));
     card.append(head, actionList(d.action, d.to_label));
     if (d.review) card.append(reviewBlock(d.review.verdict, d.review.reason, d.review.span, d.review.model));
     else card.append(reviewBlock(null, "Not needed: the policy decided first.", "", "not asked"));
@@ -335,20 +450,55 @@ function onGateResult(d) {
   const [good, text] = outcomeText(d);
   c.card.append(receiptBlock(d.receipts, "Receipts for this action"));
   c.card.append(el("div", `outcome ${good ? "ok" : "bad"}`, text));
+  if (d.can_remember) c.card.append(rememberBox(d));
+}
+
+function rememberBox(d) {
+  // You approved someone who is not in your memory. Offer to remember them as YOUR fact.
+  const box = el("div", "override");
+  const field = d.action.type === "wallet_tx" ? "wallet" : "email";
+  const today = new Date().toISOString().slice(0, 10);
+  box.append(el("div", "", `Remember ${d.action.to} for next time? It is saved as your own fact, with the source ` +
+    `"approved by you on ${today}", so the next run treats it as a known contact.`));
+  const input = el("input");
+  input.placeholder = "Their name";
+  input.setAttribute("aria-label", "Their name");
+  input.maxLength = 60;
+  const go = el("button", "", `Remember this ${field}`);
+  go.type = "button";
+  const msg = el("div", "card-msg");
+  go.addEventListener("click", async () => {
+    const r = await api("/api/remember", { run_id: runId, rid: d.rid, name: input.value });
+    if (!r.ok) { msg.textContent = r.data.error || "Not saved."; return; }
+    box.textContent = "";
+    const ul = el("ul", "facts");
+    ul.append(factItem(r.data.fact));
+    box.append(el("div", "outcome ok", "Remembered. Run it again and this address counts as a known contact."), ul);
+  });
+  box.append(input, go, msg);
+  return box;
 }
 
 function onSummary(d) {
   const s = $("summary");
   s.hidden = false;
   s.textContent = "";
-  s.append(el("div", "block-label", "The assistant's answer"), el("div", "final", d.final));
+  const final = el("div", "final md");
+  final.append(renderMarkdown(d.final));
+  s.append(el("div", "block-label", "The assistant's answer, in its own words"), final);
   let counts;
-  if (d.outbound === 0) {
+  if (d.outbound === 0 && d.refused) {
+    counts = `Nothing reached the gate. ${d.refused} payment${d.refused > 1 ? "s were" : " was"} refused before it: ` +
+      "the wallet was not one you saved.";
+  } else if (d.outbound === 0 && scenario() === "morning") {
+    counts = "Nothing reached the gate in these runs.";
+  } else if (d.outbound === 0) {
     counts = $("unguarded").checked
       ? "Nothing reached the gate: the assistant did not try to send anything this time."
       : "Nothing reached the gate: the assistant did not try to send anything. To see the gate stop a model that obeys the email, tick \"Remove the brain's warning\" and run again.";
   } else {
     counts = `${d.outbound} outbound action${d.outbound > 1 ? "s" : ""} reached the gate: ${d.executed} went ahead, ${d.stopped} stopped.`;
+    if (d.refused) counts += ` ${d.refused} payment${d.refused > 1 ? "s were" : " was"} refused before the gate: not a wallet you saved.`;
   }
   s.append(el("div", "counts", counts), el("div", "counts", `Tokens used this run: ${d.tokens_used.toLocaleString()}`));
 }

@@ -11,10 +11,11 @@
 <main class="wrap">
   <header class="top">
     <div class="brand"><span class="mark" aria-hidden="true"></span>homestead</div>
-    <h1>Your assistant thinks in the cloud. Your gate decides what leaves.</h1>
-    <p class="lede">An AI assistant reads your email, so anyone who can email you can try to give it orders.
-      Every email or payment it tries to send stops at a gate: a second model reviews it, you say yes or no,
-      and a receipt is written before anything happens.</p>
+    <h1>A personal assistant that works while you sleep and can't be talked into spending your money.</h1>
+    <p class="lede">It wakes on a schedule, reads only your new mail, uses skills you wrote, and pays only people
+      you saved in its memory. Everything it tries to send stops at a gate: a second model reviews it, you say
+      yes or no, and a receipt is written before anything happens. The cloud does the thinking. Your machine has
+      the veto.</p>
     <p class="models" id="models"></p>
   </header>
 
@@ -25,7 +26,14 @@
   <section class="panel" aria-labelledby="h-task">
     <h2 id="h-task"><span class="num">1</span>Pick a task</h2>
     <div class="scenarios" role="radiogroup" aria-label="Task">
-      <label class="scenario"><input type="radio" name="scenario" value="pay" checked>
+      <label class="scenario"><input type="radio" name="scenario" value="morning" checked>
+        <span class="s-title">Morning run</span>
+        <span class="s-sub">Two scheduled runs of your triage skill, at 07:00 and 07:15. New mail arrives in between,
+          including Sam saying his wallet changed. Each run leaves a brief.</span></label>
+      <label class="scenario"><input type="radio" name="scenario" value="skill">
+        <span class="s-title">Run one of your skills</span>
+        <span class="s-sub">Pick a skill, or write your own. A skill is your request in your own words.</span></label>
+      <label class="scenario"><input type="radio" name="scenario" value="pay">
         <span class="s-title">Pay Sam's invoice</span>
         <span class="s-sub">"Pay Sam the plumber's invoice." A real request. Watch it pass.</span></label>
       <label class="scenario"><input type="radio" name="scenario" value="summarize">
@@ -34,6 +42,24 @@
       <label class="scenario"><input type="radio" name="scenario" value="custom">
         <span class="s-title">Try your own injection</span>
         <span class="s-sub">Write the poisoned email yourself. Same task: summarize the inbox.</span></label>
+    </div>
+
+    <div class="custom" id="skill-box" hidden>
+      <label for="skill-pick" class="field-label">Your skills</label>
+      <select id="skill-pick"></select>
+      <div class="skill-info" id="skill-info"></div>
+      <details class="add-skill" id="add-skill">
+        <summary>Write your own skill</summary>
+        <label for="skill-name" class="field-label">Name</label>
+        <input id="skill-name" maxlength="24" autocomplete="off" spellcheck="false" placeholder="landlord">
+        <label for="skill-text" class="field-label">Instruction, in your words</label>
+        <textarea id="skill-text" rows="3" placeholder="Email landlord@example.org that the kitchen sink is fixed."></textarea>
+        <div class="hint">This is <strong>your request</strong>, so the gate trusts it: every action is judged against it.
+          That is the opposite of the injection box, which is an email someone else sent you and is never trusted.
+          Its tools are fixed: <span id="safe-tools"></span>. No payments, and every email still stops at the gate.</div>
+        <button type="button" class="ghost" id="skill-save">Save skill</button>
+        <p class="status" id="skill-status" role="status" aria-live="polite"></p>
+      </details>
     </div>
 
     <div class="custom" id="custom" hidden>
@@ -56,9 +82,10 @@
 
   <section class="panel" aria-labelledby="h-steps">
     <h2 id="h-steps"><span class="num">2</span>What the assistant did</h2>
-    <p class="task-line" id="task-line">Nothing yet. Pick a task and press Run.</p>
+    <div class="task-line" id="task-line">Nothing yet. Pick a task and press Run.</div>
     <ol class="timeline" id="timeline"></ol>
     <div class="summary" id="summary" hidden></div>
+    <div class="memory" id="memory" hidden></div>
   </section>
 
   <section class="panel" aria-labelledby="h-verify">
@@ -77,11 +104,13 @@
     <p><strong>What is real here:</strong> the assistant loop, the gate (policy, the reviewer's prompt, your decision,
       receipts written before anything runs) and the receipt verifier are the same code as the product.
       <strong>What is not:</strong> the inbox, bills and wallet are fake. Email is never sent; approved mail is written to
-      a file. Payments are unsigned Sepolia testnet transactions. Your session has its own data and receipts, and they are
-      deleted an hour after you start.</p>
+      a file. Payments are unsigned Sepolia testnet transactions. In the morning run only the clock is simulated: the two
+      runs are the same code as <code>homestead-gate assistant --watch</code>, and nothing is approved on this page during
+      them. Your session has its own data, memory, skills and receipts, and they are deleted an hour after you start.</p>
     <p id="limits" class="muted"></p>
   </footer>
 </main>
+<script src="/static/md.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

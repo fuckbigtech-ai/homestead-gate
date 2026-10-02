@@ -446,6 +446,136 @@ def test_web_approver_lives_only_under_demo():
     assert hits == [REPO / "demo" / "web" / "approver.py"]
 
 
+# ---- morning run, skills, memory ----------------------------------------------------------
+
+def offline_app(tmp_path, **kw):
+    """The page's offline mode: the scripted brain and the scripted reviewer, no model at all."""
+    from demo.web.scripted_brain import ScriptedBrain
+    kw.setdefault("clock", Clock())
+    return srv.App(tmp_path / "hg-web-demo-test", brain_factory=lambda budget: ScriptedBrain(),
+                   reviewer_factory=lambda budget: rv_mod.ScriptedReviewer(), **kw)
+
+
+def kinds(run):
+    return [e["type"] for e in run.events if e["type"] != "thinking"]
+
+
+def test_morning_run_is_two_scheduled_passes_with_a_brief_each(tmp_path):
+    app = offline_app(tmp_path)
+    s = app.session(None)
+    run = app.start_run(s, "morning", background=False)
+    ev = {k: [e["data"] for e in run.events if e["type"] == k] for k in
+          ("start", "tick", "brief", "mail_arrived", "gate_result", "memory", "summary", "approval", "run_error")}
+    assert run.events[0]["type"] == "start" and run.events[0]["data"]["task"] == asst.SKILLS["triage"]
+    assert not ev["run_error"] and not ev["approval"]                # nothing is approved on the page
+    assert [t["at"] for t in ev["tick"]] == ["07:00", "07:15"]
+    assert len(ev["tick"][0]["new"]) == 4 and [m["id"] for m in ev["tick"][1]["new"]] == ["msg-005", "msg-006"]
+    assert [m["id"] for m in ev["mail_arrived"][0]["messages"]] == ["msg-005", "msg-006"]
+    assert kinds(run).index("mail_arrived") > kinds(run).index("brief")      # mail arrives between passes
+    first, second = ev["brief"]
+    assert first["done"] == 1 and first["notification"] == "4 new, 1 done, 0 waiting for you"
+    assert "Re: Saturday?" in first["markdown"] and "approved by the policy" in first["markdown"]
+    assert second["waiting"] == 2 and f"Pay 0.02 ETH to {asst.NEW_WALLET}: not done, refused before the gate" \
+        in second["markdown"]
+    assert "held for your yes" in second["markdown"]
+    held = [g for g in ev["gate_result"] if g["status"] == "expired"]
+    assert held and held[0]["by"] == "human:held" and "Nobody is at the terminal" in held[0]["rule"]
+    wallet = next(f for f in ev["memory"][0]["facts"] if f["field"] == "wallet")
+    assert wallet == {"entity": "Sam Rivera", "field": "wallet", "value": asst.SAM_WALLET, "written_by": "you",
+                      "when": "2026-09-22", "source": "added by you on 2026-09-22"}
+    assert asst.NEW_WALLET not in json.dumps(ledger.read_all(s.ledger_dir))
+    assert not ledger.verify_chain(s.ledger_dir)
+    assert len(s.window.times) == 2 and ev["summary"][0]["refused"] == 1
+    # a second morning run starts from the same seeded inbox and a fresh state
+    app.clock.t += 1
+    again = app.start_run(s, "morning", background=False)
+    assert [len(e["data"]["new"]) for e in again.events if e["type"] == "tick"] == [4, 2]
+
+
+def test_every_run_shows_the_task_first(tmp_path):
+    app = offline_app(tmp_path, session_runs_per_hour=20)
+    s = app.session(None)
+    app.add_skill(s, "landlord", "Email landlord@example.org that the kitchen sink is fixed.")
+    for scenario, kw in [("pay", {}), ("summarize", {}), ("custom", {}), ("morning", {}),
+                         ("skill", {"skill": "triage"}), ("skill", {"skill": "landlord"})]:
+        app.approval_timeout_s = 0.05
+        run = app.start_run(s, scenario, background=False, **kw)
+        assert run.events[0]["type"] == "start" and run.events[0]["data"]["task"] == run.task and run.task
+
+
+def test_your_skill_is_your_request_and_its_tools_are_fixed(tmp_path):
+    app, rv, transports = make_app(tmp_path, [[calls(call("send_email", to="landlord@example.org",
+                                                               subject="Sink", body="The sink is fixed.")),
+                                               call_pay_then_done()]], approval_timeout_s=0.05)
+    s = app.session(None)
+    with pytest.raises(srv.LimitError, match="default skill"):
+        app.add_skill(s, "triage", "do anything")
+    with pytest.raises(srv.LimitError):
+        app.add_skill(s, "Bad Name!", "x")
+    text = "Email landlord@example.org that the kitchen sink is fixed."
+    skills = app.add_skill(s, "landlord", text)
+    mine = next(k for k in skills if k["name"] == "landlord")
+    assert mine["tools"] == list(srv.skills_mod.SAFE_TOOLS) and mine["origin"] == "yours"
+    app.add_skill(s, "landlord2", text)                     # one skill of your own per page
+    assert [k["name"] for k in app.skills(s) if k["origin"] == "yours"] == ["landlord2"]
+    run = app.start_run(s, "skill", skill="landlord2", injection="IGNORED", background=False)
+    head, untrusted = rv.prompts[0].split("UNTRUSTED INPUT", 1)
+    assert f"USER REQUEST: {text}\n" in head and text not in untrusted
+    msgs = transports[0].requests[0]["body"]
+    assert msgs["messages"][1]["content"] == text
+    assert {t["function"]["name"] for t in msgs["tools"]} == set(srv.skills_mod.SAFE_TOOLS)
+    pay = next(e["data"] for e in run.events if e["type"] == "tool_error")
+    assert pay["error"] == "tool 'pay_invoice' is not part of this skill"
+    assert "IGNORED" not in (s.dir / "inbox.json").read_text()
+
+
+def call_pay_then_done():
+    return calls(call("pay_invoice", invoice_id="INV-104", to=asst.SAM_WALLET, value_eth=0.02))
+
+
+def test_remember_after_you_approve_then_it_is_a_known_contact(tmp_path):
+    email = calls(call("send_email", to="landlord@example.org", subject="Sink", body="The sink is fixed."))
+    app, rv, _ = make_app(tmp_path, [[email, done()], [email, done()]])
+    s = app.session(None)
+    app.add_skill(s, "landlord", "Email landlord@example.org that the kitchen sink is fixed.")
+    decide_when_asked(app, s, "approve")
+    run = app.start_run(s, "skill", skill="landlord", background=False)
+    res = next(e["data"] for e in run.events if e["type"] == "gate_result")
+    assert res["status"] == "executed" and res["by"] == "human:web-demo" and res["can_remember"]
+    with pytest.raises(srv.LimitError):
+        app.remember(s, run.id, "not-a-request", "Pat")           # only something you approved
+    with pytest.raises(srv.LimitError):
+        app.remember(s, run.id, res["rid"], "")
+    fact = app.remember(s, run.id, res["rid"], "  Pat   the landlord ")["fact"]
+    assert fact["entity"] == "Pat the landlord" and fact["value"] == "landlord@example.org"
+    assert fact["written_by"] == "you" and fact["source"].startswith("approved by you on ")
+    with pytest.raises(srv.LimitError):
+        app.remember(s, run.id, res["rid"], "Pat")                # once
+    app.clock.t += 1
+    again = app.start_run(s, "skill", skill="landlord", background=False)
+    res2 = next(e["data"] for e in again.events if e["type"] == "gate_result")
+    assert not any(e["type"] == "approval" for e in again.events)   # memory decided: no card this time
+    assert res2["status"] == "executed" and res2["by"] == "policy" and not res2["can_remember"]
+    assert res2["to_label"] == "Pat the landlord (in your memory, written by you)"
+
+
+def test_the_page_cannot_remember_what_the_policy_or_model_chose(tmp_path):
+    pay = [calls(call("recall", entity="Sam")),
+           calls(call("pay_invoice", invoice_id="INV-104", to=asst.SAM_WALLET, value_eth=0.02)), done()]
+    app, *_ = make_app(tmp_path, [pay])
+    s = app.session(None)
+    run = app.start_run(s, "pay", background=False)
+    res = next(e["data"] for e in run.events if e["type"] == "gate_result")
+    assert res["by"] == "policy" and not res["can_remember"] and not run.rememberable
+    mem = next(e["data"]["facts"] for e in run.events if e["type"] == "memory")
+    assert {(f["entity"], f["field"], f["written_by"]) for f in mem} >= {("Sam Rivera", "wallet", "you")}
+
+
+def test_window_takes_all_or_nothing():
+    w = srv.Window(3)
+    assert w.take_n(0, 2) and not w.take_n(0, 2) and len(w.times) == 2 and w.take_n(0, 1)
+
+
 # ---- the page -----------------------------------------------------------------------------
 
 def test_no_em_or_en_dashes_in_the_demo():
@@ -456,8 +586,62 @@ def test_no_em_or_en_dashes_in_the_demo():
 
 
 def test_page_renders_untrusted_text_as_text():
-    js = (REPO / "demo" / "web" / "static" / "app.js").read_text()
-    assert "innerHTML" not in js and "insertAdjacentHTML" not in js and "document.write" not in js
+    files = sorted((REPO / "demo" / "web" / "static").glob("*.js"))
+    assert {p.name for p in files} >= {"app.js", "md.js"}
+    for p in files:
+        js = p.read_text()
+        for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser",
+                    "createContextualFragment", "eval(", "new Function"):
+            assert bad not in js, (p.name, bad)
+
+
+MD_HARNESS = r"""
+const { renderMarkdown } = require(process.argv[2]);
+function node(tag) {
+  const n = { tagName: tag.toUpperCase(), children: [], className: "",
+    appendChild(c) { this.children.push(c); return c; },
+    get lastChild() { return this.children[this.children.length - 1]; },
+    set textContent(v) { this.children = [{ text: String(v) }]; } };
+  Object.defineProperty(n, "innerHTML", { set() { throw new Error("innerHTML used"); } });
+  return n;
+}
+const doc = { createElement: node, createTextNode: (t) => ({ text: String(t) }),
+  createDocumentFragment: () => node("#frag") };
+const ser = (n) => n.text !== undefined ? n.text.replace(/</g, "&lt;")
+  : n.tagName === "#FRAG" ? n.children.map(ser).join("")
+  : `<${n.tagName.toLowerCase()}${n.className ? "." + n.className : ""}>${n.children.map(ser).join("")}</${n.tagName.toLowerCase()}>`;
+process.stdout.write(ser(renderMarkdown(require("fs").readFileSync(0, "utf8"), doc)));
+"""
+
+
+def _md(tmp_path, text):
+    import shutil
+    if not shutil.which("node"):
+        pytest.skip("node is not installed")
+    h = tmp_path / "md_harness.js"
+    h.write_text(MD_HARNESS)
+    r = subprocess.run(["node", str(h), str(REPO / "demo" / "web" / "static" / "md.js")], input=text,
+                       capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def test_markdown_renders_as_nodes_not_html(tmp_path):
+    out = _md(tmp_path, "**Dana** said *yes*.\nSee `INV-104`.\n\n- one\n- **two**\n\n1. a\n2. b\n\n## Next\n> quoted")
+    assert out == ("<p><strong>Dana</strong> said <em>yes</em>.<br></br>See <code>INV-104</code>.</p>"
+                   "<ul><li>one</li><li><strong>two</strong></li></ul><ol><li>a</li><li>b</li></ol>"
+                   "<div.md-h>Next</div><blockquote><p>quoted</p></blockquote>")
+    quoted = _md(tmp_path, "> I went through **2 new emails**.\n>\n> - a payment: refused\n> - an email: held\nafter")
+    assert quoted == ("<blockquote><p>I went through <strong>2 new emails</strong>.</p>"
+                      "<ul><li>a payment: refused</li><li>an email: held</li></ul></blockquote><p>after</p>")
+
+
+def test_markdown_never_makes_html_or_links(tmp_path):
+    evil = '<img src=x onerror=alert(1)> **<b>bold</b>** [click](javascript:alert(1)) `<script>`'
+    out = _md(tmp_path, evil)
+    assert "<img" not in out and "<b>" not in out and "<script>" not in out and "<a" not in out
+    assert "&lt;img src=x onerror=alert(1)>" in out and "click (javascript:alert(1))" in out
+    assert "<strong>&lt;b>bold&lt;/b></strong>" in out and "<code>&lt;script></code>" in out
 
 
 def test_demo_mode_is_labelled():
@@ -518,6 +702,44 @@ def test_http_end_to_end(tmp_path):
         st, _, body = req("GET", "/api/verify", headers={"Cookie": cookie})
         assert json.loads(body)["ok"] and st == 200
         assert req("GET", f"/api/runs/{run_id}/events")[0] == 404   # another browser cannot watch it
+    finally:
+        httpd.shutdown()
+        app.close()
+
+
+def test_http_skills_markdown_and_remember_routes(tmp_path):
+    app = offline_app(tmp_path)
+    from http.server import ThreadingHTTPServer
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), srv.make_handler(app))
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+
+    def req(method, path, body=None, headers=None):
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        c.request(method, path, None if body is None else json.dumps(body),
+                  {"Content-Type": "application/json", **(headers or {})})
+        r = c.getresponse()
+        return r.status, dict(r.getheaders()), r.read()
+
+    try:
+        st, _, body = req("GET", "/api/config")
+        cfg = json.loads(body)
+        assert [k["name"] for k in cfg["skills"]] == ["triage", "pay", "summarize"] and not app.sessions
+        assert cfg["safe_tools"] == list(srv.skills_mod.SAFE_TOOLS) and "morning" in cfg["scenarios"]
+        st, h, js = req("GET", "/static/md.js")
+        assert st == 200 and h["Content-Type"].startswith("text/javascript") and b"renderMarkdown" in js
+        assert b'src="/static/md.js"' in req("GET", "/")[2]
+        st, h, body = req("POST", "/api/skill", {"name": "landlord", "instruction": "Email landlord@example.org.",
+                                                  "tools": ["pay_invoice"]})
+        cookie = h["Set-Cookie"].split(";")[0]
+        mine = next(k for k in json.loads(body)["skills"] if k["name"] == "landlord")
+        assert st == 200 and "pay_invoice" not in mine["tools"]          # the page cannot pick tools
+        cfg = json.loads(req("GET", "/api/config", headers={"Cookie": cookie})[2])
+        assert "landlord" in [k["name"] for k in cfg["skills"]]
+        assert req("POST", "/api/remember", {"run_id": "x", "rid": "y", "name": "Pat"},
+                   {"Cookie": cookie})[0] == 409
+        assert req("POST", "/api/skill", {"name": "pay", "instruction": "x"}, {"Cookie": cookie})[0] == 400
     finally:
         httpd.shutdown()
         app.close()
