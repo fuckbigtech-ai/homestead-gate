@@ -194,6 +194,136 @@ Limits: another program running as you can still ask the keychain for the entry.
 a visible permission dialog rather than the password, so say no to anything that isn't the gate. A
 compromised gate process has the password. Linux needs libsecret; there is no plaintext fallback.
 
+### Assistant (hackathon demo)
+
+A small personal assistant for the Nebius x NVIDIA hackathon. Two NVIDIA open models: Nemotron 3
+Super on Nebius Token Factory plans and calls tools; Nemotron 3 Nano 4B runs on your machine as the
+gate's reviewer. Everything the assistant sends goes through the gate above, so the cloud does the
+thinking, your machine has the veto, and the cloud can't vote.
+
+```bash
+export NEBIUS_API_KEY=...                                    # Nebius Token Factory (default backend)
+ollama pull nemotron-3-nano:4b                               # the local reviewer
+homestead-gate assistant --smoke                             # one live call with one tool, then exit
+homestead-gate assistant --skill triage                      # reply to the email that needs an answer
+homestead-gate assistant --skill pay                         # pay the plumber's invoice
+homestead-gate assistant --skill summarize                   # an inbox with a poisoned email in it
+homestead-gate assistant --task "..." --data DIR
+homestead-gate assistant --backend nim ...                   # NVIDIA's hosted API instead (NVIDIA_API_KEY)
+```
+
+The data is fake: an inbox, one bill, a memory and a policy, written to
+`~/.homestead-gate/assistant` (or `--data DIR`) on first run. That directory has its own receipts
+and outbox, separate from the gate's. Email is dry-run unless you pass `--live`, the same as `up`.
+Payments are unsigned Sepolia transactions.
+
+- **Read tools run at once:** `list_inbox`, `read_email`, `list_bills`, `recall` and `remember`.
+- **Outbound tools are gate requests:** `send_email` and `pay_invoice`. They get the same policy,
+  local reviewer, terminal approval and receipts as any other agent. The model gets a submit
+  function, not the gate. It has no tool that approves, and any tool name it makes up is refused.
+- **Fixed fields:** each action is built from a fixed list of arguments. Extra fields the model
+  adds, such as `"approved": true`, a chain id or calldata, are dropped.
+- **What it read goes with every request.** This code attaches the output of every read tool, not
+  the model. So on this path the model cannot leave the poisoned email out, which narrows the
+  "agent that hides what it read" gap below. Limits: the reviewer runs at a 4096-token context, so
+  a long read keeps only its first 1400 and last 600 characters, with a note of how much was cut.
+  Text hidden in the middle of a long email reaches the cloud model but not the reviewer. And
+  GateBench measured one untrusted source per request; this path sends several, a shape the
+  published numbers do not cover.
+- **No asking twice.** An action that was denied is refused if the model tries it again, and a
+  run may submit only 4 outbound actions.
+- **Memory** is [homestead-memory](https://github.com/fuckbigtech-ai/homestead-memory). Each fact
+  records who wrote it, when, and its source. When the assistant remembers something, this code
+  sets the source from what the run actually read, never from what the model says. Payees come
+  from memory, never from an email.
+- **The daily cap holds across runs.** Each run is a new process, so at start the assistant
+  replays the last 24 hours of autonomous payments from its receipts.
+- **Money moves on its own only if you asked for a payment.** If your request never mentions paying
+  (an invoice, a bill, a tip, a refund, sending an amount), any payment the agent attempts goes to
+  you, even to an allowlisted payee the model approves. Found in our own demo: asked to "reply to
+  anything that needs an answer", the agent paid an invoice and the model approved it.
+
+Token Factory is OpenAI-compatible: `https://api.tokenfactory.nebius.com/v1`, model
+`nvidia/nemotron-3-super-120b-a12b` (override with `HG_TOKENFACTORY_BASE_URL` /
+`HG_TOKENFACTORY_MODEL`, or `--base-url` / `--llm-model`). The API key is read from the environment
+when a request is built. It is never logged, printed or written to a receipt.
+
+A cloud model that ignores the poisoned email never reaches the gate. To show the gate catching
+a model that obeys it, `--unguarded-prompt` removes the warning about email instructions from
+the system prompt. Our demo recordings say when they use it.
+
+#### Web demo (demo mode)
+
+`demo/web` runs the same Assistant and Gate behind a phone-sized page: pick a task (or write your
+own poisoned email), watch each step, answer the approval card, then verify the receipts and see
+a tampered copy fail.
+
+```bash
+export NEBIUS_API_KEY=...
+PYTHONPATH=src python -m demo.web.server                   # http://127.0.0.1:8000
+DEMO_BRAIN=scripted DEMO_REVIEWER=scripted PYTHONPATH=src python -m demo.web.server   # offline, no models
+DEMO_REVIEWER=ollama OLLAMA_URL=https://...modal.run PYTHONPATH=src python -m demo.web.server   # Nano 4B on a Modal GPU
+```
+
+**Demo mode is not the product.** On the page, approval is a button and the reviewer is Nemotron
+Nano 30B on Nebius Token Factory, so visitors need no GPU. In the product the reviewer runs on your
+machine and approval happens only in the terminal you started the gate in; there is no approve
+button on the network. The web approver lives only in `demo/web`, and a test fails if anything in
+`src/homestead_gate` can import it. GateBench numbers were measured on the local reviewers, not on
+the hosted Nano 30B. Each browser session gets its own data and receipts, deleted after an hour.
+Runs are rate limited (5 per page and 20 in total per hour by default) with a token budget per run.
+Email is never sent and payments are unsigned. `demo/web/modal_app.py` would host it on Modal; it
+has not been deployed.
+
+### Threat model
+
+Who can attack, what they can do, and what stops them. "Outbound action" means anything that leaves your
+machine on your behalf: an email, a message, a payment, a wallet transaction.
+
+| attacker | what they can do | what stops them | what does not |
+|---|---|---|---|
+| **Anyone who can put text in front of the agent** (an email, a web page, a tool result, a skill) | Steer the agent into an outbound action you did not ask for | The gate sees the exact action, what you asked for and what the agent read. A recipient, account or link you never named, or data you did not ask to send, is flagged and waits for you | Text that only changes what the agent *tells you* (a fake recommendation): no action, so the gate never sees it |
+| **A compromised cloud model** (the brain itself is hostile) | Propose any action, invent arguments, retry | Same gate, same rules: the brain has a submit function, not the gate. Denied actions can't be retried, a run gets 4 outbound actions, unknown tools are refused, extra fields are dropped | The brain can lie in its summary to you. Read the receipts, not the summary |
+| **A compromised or wrong local reviewer** | Approve something it should not | It is only one of two keys: anything flagged, anything not allowlisted, any calldata, any payment you never asked for, and any spend over the daily cap still needs you | A reviewer that approves an allowlisted, in-cap payment you did ask for, to the payee you named. That is the one path the policy lets through without you |
+| **Someone replaying an old approval** | Reuse a "yes" for a different action | Each approval is bound to the exact typed action and the policy version that judged it; a changed field is a new request | |
+| **Someone with your files** | Edit, delete or rebuild the receipt log | Every record holds the hash of the one before it, so an edit breaks the chain at that line (`homestead-gate watch` exits 1) | Deleting the newest records or rebuilding the whole log. Sign a checkpoint (`hsm checkpoint ~/.homestead-gate/ledger`) and keep it where they can't write |
+| **An agent going around the gate** | Use your SMTP password or a wallet key directly | `homestead-gate run` sandboxes the agent: it can reach the gate, the local model and the hosts you allow, and it can't read your SSH keys, cloud credentials or `.env` files. The gate holds the email credentials, not the agent | Anything sent to a host you allowed |
+
+How well it works, measured on outside benchmarks, is in [bench/agentdojo/RESULTS.md](bench/agentdojo/RESULTS.md):
+without a gate, 28 to 36% of the attacks that try an action succeed on AgentDojo's banking, Slack and travel
+suites; with the gate (model only, no human), none did. The cost is that it also blocks some legitimate work, and
+those numbers are in the same file.
+
+### FAQ
+
+**How is this different from a sandbox (bubblewrap, gVisor, OpenShell)?** A sandbox decides what an agent can
+*reach*. It can't tell "pay my plumber" from "pay the attacker", because both are the same call to the same
+host. The gate judges each action against what you asked for. Use both: `homestead-gate run` is the sandbox,
+the gate is the layer that reads the action.
+
+**Isn't a model guarding a model just more guardrails?** That is why it is 2-of-2. The local model is one key and
+you are the other. When the model is unsure or flags something, nothing happens until you decide, and the
+policy (allowlists, a daily spending cap, calldata always to a human, no payment you never asked for) holds no
+matter what either model says.
+
+**Why not just ask me to confirm everything?** People approve on reflex after the tenth prompt. The gate asks only
+when the model flags an action or a rule requires it (calldata, a payment you never asked for, spending over the
+cap). It still asks too often on some kinds of task, such as "do what this file says": on AgentDojo's banking
+tasks it flagged most of the actions it reviewed. Cutting that without letting attacks through is the open
+problem, and the attempts so far are in the results.
+
+**Where is the methodology?** GateBench's cases, prompt, run files and scorer are in [bench/](bench/), with a
+frozen test split scored on both sides (attacks caught and legitimate actions blocked). The AgentDojo runs use
+ETH Zurich's own tasks, attacks and scoring; the merge script recomputes every number from the traces, and the
+write-up keeps the failed attempts (prompt v3 and v4 failed our held-out check, v5 did not beat v1 on travel).
+
+**Does it phone home?** No. The gate, its reviewer and the receipts run on your machine. The only network
+calls are the ones you configure: the cloud brain (Nebius Token Factory or NVIDIA NIM) and the email server
+you give it. The gate sends no telemetry.
+
+**Who is it for?** Anyone letting an AI assistant touch their email or money: the person who wants the
+assistant to pay bills and answer mail, and doesn't want one poisoned email to empty the inbox to a stranger.
+
 ### What it does not defend against
 
 - **An agent that can reach your accounts some other way.** If the agent has your SMTP password,

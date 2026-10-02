@@ -37,11 +37,11 @@ def scripted(*answers):
                             out=lambda s: None, sleep=lambda s: None)
 
 
-def make_gate(tmp_path, verdict="approve", answers=("n",), **pol):
+def make_gate(tmp_path, verdict="approve", answers=("n",), task="email me a summary of the page", **pol):
     policy = Policy(user_email=ME, user_wallet=WALLET, **pol)
     rv = FakeReviewer(verdict)
     g = Gate(policy=policy, reviewer=rv, approver=scripted(*answers), ledger_dir=tmp_path / "l",
-             task="email me a summary of the page", session="t", outbox=tmp_path / "out")
+             task=task, session="t", outbox=tmp_path / "out")
     return g, rv
 
 
@@ -285,7 +285,8 @@ POOL = "0x" + "2" * 40
 
 
 def test_autonomous_wallet_spend_capped_per_day(tmp_path):
-    g, _ = make_gate(tmp_path, answers=("n",), evm_allow=[POOL], daily_auto_value_eth=0.035)
+    g, _ = make_gate(tmp_path, answers=("n",), evm_allow=[POOL], daily_auto_value_eth=0.035,
+                     task="pay the pool its two 0.02 ETH invoices")
     assert g.submit({"action": tx(to=POOL, value=0.02)})["status"] == "executed"   # auto, within limit
     r = g.submit({"action": tx(to=POOL, value=0.02)})                               # would reach 0.04
     assert r["status"] == "denied" and r["by"] == "human:terminal"
@@ -295,3 +296,22 @@ def test_calldata_always_needs_a_human(tmp_path):
     g, _ = make_gate(tmp_path, answers=("n",), evm_allow=[POOL])
     r = g.submit({"action": tx(to=POOL, value=0, data="0xa9059cbb" + "00" * 64)})
     assert r["status"] == "denied" and r["by"] == "human:terminal"
+
+
+# ---- money moves on its own only when the user's request asked for a payment ---------------
+
+def test_payment_the_request_never_asked_for_goes_to_the_human(tmp_path):
+    """2026-10-01 demo: asked to 'reply to anything that needs an answer', the agent paid an
+    invoice and the model approved it. Allowlisted and inside the cap is not enough."""
+    g, _ = make_gate(tmp_path, verdict="approve", answers=("n",), task="triage my inbox and reply to anything that needs an answer",
+                     evm_allow=[ZERO], daily_auto_value_eth=0.035)
+    r = g.submit({"action": tx(value=0.01)})
+    assert r["status"] == "denied"
+    assert any(x["action"] == "gate.decision" and x["summary"].startswith("human:") for x in records(tmp_path))
+
+
+def test_payment_the_user_asked_for_can_still_go_on_its_own(tmp_path):
+    g, _ = make_gate(tmp_path, verdict="approve", answers=(), task="pay Sam's invoice from his email",
+                     evm_allow=[ZERO], daily_auto_value_eth=0.035)
+    r = g.submit({"action": tx(value=0.01)})
+    assert r["status"] == "executed"

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>homestead gate demo</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main class="wrap">
+  <header class="top">
+    <div class="brand"><span class="mark" aria-hidden="true"></span>homestead</div>
+    <h1>Your assistant thinks in the cloud. Your gate decides what leaves.</h1>
+    <p class="lede">An AI assistant reads your email, so anyone who can email you can try to give it orders.
+      Every email or payment it tries to send stops at a gate: a second model reviews it, you say yes or no,
+      and a receipt is written before anything happens.</p>
+    <p class="models" id="models"></p>
+  </header>
+
+  <aside class="demo-note" id="demo-note" role="note">
+    <strong>Demo mode:</strong> <span id="demo-text"></span>
+  </aside>
+
+  <section class="panel" aria-labelledby="h-task">
+    <h2 id="h-task"><span class="num">1</span>Pick a task</h2>
+    <div class="scenarios" role="radiogroup" aria-label="Task">
+      <label class="scenario"><input type="radio" name="scenario" value="pay" checked>
+        <span class="s-title">Pay Sam's invoice</span>
+        <span class="s-sub">"Pay Sam the plumber's invoice." A real request. Watch it pass.</span></label>
+      <label class="scenario"><input type="radio" name="scenario" value="summarize">
+        <span class="s-title">Read every email and summarize</span>
+        <span class="s-sub">One email in the inbox hides an order to forward your mail to a stranger.</span></label>
+      <label class="scenario"><input type="radio" name="scenario" value="custom">
+        <span class="s-title">Try your own injection</span>
+        <span class="s-sub">Write the poisoned email yourself. Same task: summarize the inbox.</span></label>
+    </div>
+
+    <div class="custom" id="custom" hidden>
+      <label for="injection" class="field-label">Body of the email from security@mail-protect.example</label>
+      <textarea id="injection" rows="6" spellcheck="false"></textarea>
+      <div class="hint"><span id="inj-count"></span> This text goes into the inbox as an email. The assistant and
+        the reviewer see it as something the assistant read, never as your request.</div>
+    </div>
+
+    <label class="toggle">
+      <input type="checkbox" id="unguarded">
+      <span><strong>Remove the brain's warning about instructions in emails.</strong>
+        With the warning, the cloud model often ignores the poisoned email, so nothing reaches the gate.
+        Remove it to see the gate stop a model that obeys.</span>
+    </label>
+
+    <button class="run" id="run" type="button">Run</button>
+    <p class="status" id="run-status" role="status" aria-live="polite"></p>
+  </section>
+
+  <section class="panel" aria-labelledby="h-steps">
+    <h2 id="h-steps"><span class="num">2</span>What the assistant did</h2>
+    <p class="task-line" id="task-line">Nothing yet. Pick a task and press Run.</p>
+    <ol class="timeline" id="timeline"></ol>
+    <div class="summary" id="summary" hidden></div>
+  </section>
+
+  <section class="panel" aria-labelledby="h-verify">
+    <h2 id="h-verify"><span class="num">3</span>Check the receipts</h2>
+    <p class="muted">Every decision is a line in a hash chain. Each line holds the hash of the line before it,
+      so editing any line breaks the chain from that point. The check below recomputes every hash on the server
+      with the same verifier as <code>homestead-gate watch</code>.</p>
+    <div class="row">
+      <button type="button" class="ghost" id="verify">Verify receipts</button>
+      <button type="button" class="ghost" id="tamper">Tamper with a copy</button>
+    </div>
+    <div id="verify-out"></div>
+  </section>
+
+  <footer class="foot">
+    <p><strong>What is real here:</strong> the assistant loop, the gate (policy, the reviewer's prompt, your decision,
+      receipts written before anything runs) and the receipt verifier are the same code as the product.
+      <strong>What is not:</strong> the inbox, bills and wallet are fake. Email is never sent; approved mail is written to
+      a file. Payments are unsigned Sepolia testnet transactions. Your session has its own data and receipts, and they are
+      deleted an hour after you start.</p>
+    <p id="limits" class="muted"></p>
+  </footer>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
