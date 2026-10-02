@@ -330,6 +330,23 @@ def test_cli_watch_once_then_pending_then_remember(tmp_path, monkeypatch, capsys
     assert DENTIST in asst.load_policy(d).email_allow          # next time it is a known contact
 
 
+def test_cli_offers_to_remember_only_what_you_approved(tmp_path, monkeypatch, capsys):
+    d = tmp_path / "d"
+    new = calls(call("send_email", to="kim@example.org", subject="Hi", body="Hello Kim."))
+    to_attacker = calls(call("send_email", cid="c2", to=ATTACKER, subject="x", body="y"))
+    _cli_brain(monkeypatch, new, to_attacker, done())
+    asked = Asked("y", "send anyway", "y", "n")              # yes to Kim (flag override), no to the attacker
+    monkeypatch.setattr(cli, "TerminalApprover", lambda **kw: TerminalApprover(
+        override_delay_s=0, timeout_s=5, input_fn=asked, out=print, sleep=lambda s: None))
+    offered = []
+    monkeypatch.setattr(cli, "_ask", lambda prompt: offered.append(prompt) or "Kim Lee")
+    assert cli_main(["assistant", "--data", str(d), "--task", "Say hello to kim@example.org", "--no-model"]) == 0
+    assert len(offered) == 1 and "kim@example.org" in offered[0]
+    kim = asst.AssistantMemory(d / "memory").contacts()["kim@example.org"]
+    assert kim["written_by"] == "user" and kim["source"].startswith("approved by you on ")
+    assert ATTACKER not in asst.AssistantMemory(d / "memory").contacts()
+
+
 def test_cli_unknown_skill_and_task_with_watch(tmp_path, monkeypatch, capsys):
     _cli_brain(monkeypatch, done())
     d = str(tmp_path / "d")
