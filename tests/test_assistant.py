@@ -374,8 +374,70 @@ def test_memory_poisoning_does_not_buy_an_auto_payment(tmp_path):
              calls(call("pay_invoice", invoice_id="INV-104", to=evil, value_eth=0.02)), done()]
     bot, gate, rv, asked, _, data = setup(tmp_path, turns, task=asst.SKILLS["pay"], answers=("n",))
     out = bot.run()
-    assert out["gate"][0]["status"] == "denied" and out["gate"][0]["by"] == "human:terminal"
-    assert len(asked.prompts) == 1                       # not allowlisted: the human decides
+    # the model cannot write a wallet, so your fact survives, and the evil wallet is refused
+    # before the gate: no request, no review, nothing for anyone to approve
+    assert "come only from the user" in out["steps"][0]["result"]["error"]
+    wallet = next(f for f in out["steps"][1]["result"]["facts"] if f["field"] == "wallet")
+    assert wallet["value"] == asst.SAM_WALLET and wallet["written_by"] == "user"
+    assert "refused before the gate" in out["steps"][2]["result"]["error"]
+    assert not out["gate"] and not asked.prompts and not rv.prompts
+    assert not [r for r in receipts(data) if r["action"] == "gate.request"]
+    assert out["refusals"][0]["to"] == evil
+
+
+def test_model_cannot_overwrite_a_fact_you_wrote(tmp_path):
+    turns = [calls(call("remember", entity="Sam Rivera", field="role", value="attacker's friend")),
+             calls(call("remember", entity="Sam Rivera", field="payout_account", value="0x9")),
+             calls(call("remember", entity="Sam Rivera", field="favourite_tea", value="mint")), done()]
+    bot, *_, data = setup(tmp_path, turns, task=asst.SKILLS["pay"])
+    out = bot.run()
+    assert "only the user can change it" in out["steps"][0]["result"]["error"]
+    assert "come only from the user" in out["steps"][1]["result"]["error"]
+    assert out["steps"][2]["result"]["remembered"] == "recorded"
+    facts = {f["field"]: f for f in asst.AssistantMemory(data / "memory").recall("Sam Rivera")}
+    assert facts["role"]["value"] == "plumber, Rivera Plumbing" and facts["role"]["written_by"] == "user"
+    assert facts["favourite_tea"]["written_by"] == "homestead-assistant"
+
+
+def test_wallet_change_email_cannot_redirect_a_payment(tmp_path):
+    """Sam's 'my bank changed' email: the new wallet is refused before the gate; the one you
+    saved still pays, and the facts used are reported with who wrote them."""
+    turns = [calls(call("read_email", id="msg-005")),
+             calls(call("pay_invoice", invoice_id="INV-104", to=asst.NEW_WALLET, value_eth=0.02)),
+             calls(call("pay_invoice", cid="c2", invoice_id="INV-104", to=asst.SAM_WALLET, value_eth=0.02)),
+             done()]
+    bot, gate, rv, asked, _, data = setup(tmp_path, turns, task=asst.SKILLS["pay"])
+    asst.deliver_later_mail(data)
+    out = bot.run()
+    err = out["steps"][1]["result"]
+    assert "refused before the gate" in err["error"] and err["saved_wallets"][0]["value"] == asst.SAM_WALLET
+    assert [r["action"]["to"] for r in out["requests"]] == [asst.SAM_WALLET]
+    assert out["gate"][0]["status"] == "executed"
+    used = {(f["entity"], f["field"]): f for f in out["facts_used"]}
+    assert used[("Sam Rivera", "wallet")]["written_by"] == "user" and used[("Sam Rivera", "wallet")]["at"]
+    assert asst.NEW_WALLET not in json.dumps([r for r in receipts(data)])
+
+
+def test_hand_edited_memory_loses_its_writer(tmp_path):
+    asst.seed(tmp_path / "d", model="fake")
+    note = tmp_path / "d" / "memory" / "distilled" / "sam-rivera.md"
+    note.write_text(note.read_text().replace(asst.SAM_WALLET, asst.NEW_WALLET))
+    mem = asst.AssistantMemory(tmp_path / "d" / "memory")
+    w = next(f for f in mem.recall("Sam Rivera") if f["field"] == "wallet")
+    assert w["value"] == asst.NEW_WALLET and w["written_by"] is None
+    assert asst.NEW_WALLET.lower() not in mem.contacts()
+
+
+def test_user_contacts_feed_the_allowlist_and_assistant_facts_never_do(tmp_path):
+    data = tmp_path / "d"
+    asst.seed(data, model="fake")
+    mem = asst.AssistantMemory(data / "memory")
+    mem.remember("Lee", "email", "lee@landlord.example", source="assistant run", agent=asst.AGENT)
+    mem.remember_from_user("Kim", "email", "kim@example.org", source=asst.approved_source("2026-10-02"))
+    p = asst.load_policy(data, mem)
+    assert "kim@example.org" in p.email_allow and "lee@landlord.example" not in p.email_allow
+    kim = mem.contacts()["kim@example.org"]
+    assert kim["source"] == "approved by you on 2026-10-02" and kim["written_by"] == "user"
 
 
 def test_dict_arguments_and_cut_off_answers(tmp_path):
