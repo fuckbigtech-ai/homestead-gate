@@ -443,7 +443,7 @@ function onGateResult(d) {
     const card = el("article", "card");
     const head = el("div", "card-head");
     const held = d.status === "expired" && d.by === "human:held";
-    head.append(el("span", "card-title", `${describeAction(d.action)}: ${held ? "held for you" : "decided without asking you"}`));
+    head.append(el("span", "card-title", `${describeAction(d.action)}: ${held ? "held for you" : d.by === "policy" ? "decided by your rules" : "decided"}`));
     card.append(head, actionList(d.action, d.to_label));
     if (d.review) card.append(reviewBlock(d.review.verdict, d.review.reason, d.review.span, d.review.model));
     else card.append(reviewBlock(null, "Not needed: the policy decided first.", "", "not asked"));

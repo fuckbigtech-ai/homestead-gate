@@ -315,3 +315,22 @@ def test_payment_the_user_asked_for_can_still_go_on_its_own(tmp_path):
                      evm_allow=[ZERO], daily_auto_value_eth=0.035)
     r = g.submit({"action": tx(value=0.01)})
     assert r["status"] == "executed"
+
+
+def test_terminal_card_never_calls_no_model_a_flag():
+    from homestead_gate.approval import NO_MODEL_REASON, TerminalApprover
+    seen = []
+    a = TerminalApprover(timeout_s=5, input_fn=lambda p, t: "n", out=seen.append, sleep=lambda s: None)
+    a.ask(rid="r1", action={"type": "email", "to": "x@example.org"}, flagged=True,
+          review_reason=f"{NO_MODEL_REASON}: you decide", span="")
+    text = "\n".join(seen)
+    assert "FLAGGED" not in text and NO_MODEL_REASON in text
+    seen.clear()
+    a.ask(rid="r2", action={"type": "email", "to": "x@example.org"}, flagged=True, review_reason="odd", span="")
+    assert "reviewer FLAGGED this: odd" in "\n".join(seen)
+
+
+def test_reviewer_banner_says_local_only_when_it_is():
+    from homestead_gate.cli import where
+    assert where("http://127.0.0.1:11434") == "local" and where("http://localhost:11434") == "local"
+    assert where("https://abc.modal.run") == "remote: abc.modal.run"

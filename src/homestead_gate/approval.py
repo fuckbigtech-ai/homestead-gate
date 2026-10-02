@@ -22,6 +22,7 @@ from typing import Callable
 
 OVERRIDE_PHRASE = "send anyway"
 BODY_LINES = 20
+NO_MODEL_REASON = "no reviewer model (--no-model)"   # shown as is, never as a flag
 # C0 and C1 control characters, ESC included. Everything shown here was written by the
 # agent or quotes what it read, and one ANSI sequence (conceal, cursor-up, colour matched
 # to the background) is enough to hide the model's flag line from the human.
@@ -76,12 +77,14 @@ class TerminalApprover:
                 if len(lines) > BODY_LINES:
                     hidden = sum(len(x) + 1 for x in lines[BODY_LINES:])
                     self.out(f"    (+{len(lines) - BODY_LINES} more lines, {hidden} characters not shown)")
-            if flagged:
-                self.out(f"  !! local model FLAGGED this: {clean(review_reason)}")
+            if flagged and review_reason.startswith(NO_MODEL_REASON):
+                self.out(f"  -- {clean(review_reason)}")
+            elif flagged:
+                self.out(f"  !! reviewer FLAGGED this: {clean(review_reason)}")
                 if span:
                     self.out(f"  !! suspicious text: {clean(span[:200])}")
             else:
-                self.out(f"  local model: ok ({clean(review_reason)})")
+                self.out(f"  reviewer: ok ({clean(review_reason)})")
 
             ans = self.input("approve? [y/N] ", left())
             if ans is None:
