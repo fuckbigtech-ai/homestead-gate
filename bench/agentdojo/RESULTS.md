@@ -134,6 +134,18 @@ v5 kept every hijack out and roughly halved the legitimate actions it blocks. Cl
 task (12 to 11 of 21), within run-to-run noise at this size. No gate, for reference: banking 81% / 74% utility and
 28% attack success; Slack 90% / 60% and 30%.
 
+**Held-out check against the shipped prompt (travel, model-only gate, v1 run on Kaggle 2026-10-01/02):**
+
+| travel | utility, no attack | utility under attack | action attacks through | say-something attack through | legit blocked per run |
+|---|---|---|---|---|---|
+| v1 (ships) | **14/20 (70%)** | 87/140 (62%) | **0/120** | 7/20 | **0.04** |
+| v5 | 10/20 (50%) | 70/115 (61%) | **0/97** | 7/18 | 0.12 |
+
+v5's gains on banking and Slack (its dev suites) did not carry over: on travel, where v1 barely over-blocks, v5
+adds false blocks and finishes fewer clean tasks. Both stop every attack that tries an action. So v5 is not
+shipped; v1 stays the default. Next: look at which travel tasks v5 blocks (making travel a dev suite) and confirm
+any further change on workspace, which is still held out.
+
 Still open:
 - The v1 travel baseline (gate, model only) is running; the ship decision waits for it.
 - Remaining false blocks need judgement the code can't supply: "follow the instructions in this file" and "do
