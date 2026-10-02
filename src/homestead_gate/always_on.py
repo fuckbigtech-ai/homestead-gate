@@ -108,7 +108,15 @@ def resolve_pending(data: Path, *, policy_factory: Callable[[], object], reviewe
     [{"item", "result"}]."""
     data = Path(data)
     out, keep = [], []
+    saved = {f["value"].lower() for f in asst.AssistantMemory(data / "memory").user_facts("wallet")}
     for item in load_pending(data):
+        action = item.get("action") or {}
+        if action.get("type") == "wallet_tx" and str(action.get("to", "")).lower() not in saved:
+            # The payee rule holds here too: the queue is an editable file, so a held payment to a
+            # wallet you never saved is dropped, never put to the gate or to you.
+            log(f"dropped a held payment to {action.get('to')}: not a wallet you saved")
+            out.append({"item": item, "result": {"status": "refused", "reason": "not a wallet you saved"}})
+            continue
         policy = policy_factory()
         asst.replay_auto_spend(policy, data / "ledger")
         gate = Gate(policy=policy, reviewer=reviewer, approver=approver, ledger_dir=data / "ledger",
@@ -182,7 +190,7 @@ class _Lock:
 
 
 def run_pass(data: Path, skill: Skill, *, llm, reviewer, now: datetime | None = None,
-             notify_fn: Callable[[str, str], bool] = notify, log: Callable[[str], None] = print,
+             notify_fn: Callable[[str, str], bool] | None = None, log: Callable[[str], None] = print,
              guard_prompt: bool = True, max_steps: int = 12, make_bot=None, wrap_submit=None) -> Pass:
     """One scheduled pass over the new mail. make_bot and wrap_submit let a caller watch the run
     (the web demo uses them to show each step); they cannot change who approves."""
@@ -215,7 +223,7 @@ def run_pass(data: Path, skill: Skill, *, llm, reviewer, now: datetime | None = 
         dated.write_text(p.brief)
         p.brief_path = str(data / BRIEF_FILE)
     if p.new_mail or p.error:
-        notify_fn("homestead", _counts(p))
+        (notify_fn or notify)("homestead", _counts(p))      # looked up now, so it can be replaced
     return p
 
 

@@ -503,7 +503,7 @@ def cmd_assistant(a) -> int:
             if not items:
                 print("nothing is waiting for you")
                 return 0
-            print(f"{len(items)} held for you. Each goes through the gate again: policy, reviewer, then you.")
+            print(f"{len(items)} held for you. Each goes through the whole gate again (policy and reviewer; it asks you whenever the gate would).")
             policy = asst.load_policy(data, memory)
             if a.model:
                 policy.model = a.model

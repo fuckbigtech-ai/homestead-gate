@@ -28,8 +28,16 @@ def _guards(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", refuse)
     monkeypatch.delenv("HSM_VAULT", raising=False)
     shown = []
-    # no test may pop a real desktop notification
+    # no test may pop a real desktop notification: swap notify, and fail loudly if anything still
+    # tries to run a notifier
     monkeypatch.setattr(always_on, "notify", lambda title, msg: shown.append((title, msg)) or True)
+    inner = always_on.subprocess.run
+
+    def no_notifier(argv, *a, **kw):
+        if str((argv or [""])[0]).rsplit("/", 1)[-1] in ("osascript", "notify-send"):
+            raise AssertionError("a test tried to show a real desktop notification")
+        return inner(argv, *a, **kw)
+    monkeypatch.setattr(always_on.subprocess, "run", no_notifier)
     return shown
 
 
@@ -254,6 +262,28 @@ def test_an_edited_queue_item_is_still_judged_by_the_gate(tmp_path):
                                     approver=approver, log=lambda s: None)
     assert res[0]["result"]["status"] == "denied" and res[0]["result"]["review"] == "block"
     assert ATTACKER in rv.prompts[0].split("PROPOSED ACTION:")[-1] and asked.prompts
+
+
+def test_an_edited_held_payment_to_an_unsaved_wallet_never_reaches_the_gate(tmp_path):
+    data = _held(tmp_path)
+    items = always_on.load_pending(data)
+    items.append({**items[0], "id": "x", "action": {"type": "wallet_tx", "chain_id": 11155111,
+                                                   "to": asst.NEW_WALLET, "value_eth": 0.02}})
+    always_on.save_pending(data, items)
+    before = len(ledger.read_all(data / "ledger"))
+    res = always_on.resolve_pending(data, policy_factory=lambda: asst.load_policy(data), reviewer=FakeReviewer(),
+                                    approver=always_on.HoldApprover(), log=lambda s: None)
+    assert res[1]["result"]["status"] == "refused"
+    new = ledger.read_all(data / "ledger")[before:]
+    assert asst.NEW_WALLET not in json.dumps(new) and len([r for r in new if r["action"] == "gate.request"]) == 1
+    assert [i["action"]["to"] for i in always_on.load_pending(data)] == [DENTIST]   # dropped, not kept
+
+
+def test_cli_watch_uses_the_notifier_it_finds_at_call_time(tmp_path, monkeypatch, _guards):
+    d = tmp_path / "d"
+    _cli_brain(monkeypatch, *FIRST)
+    assert cli_main(["assistant", "--data", str(d), "--watch", "--once", "--no-model"]) == 0
+    assert _guards == [("homestead", "4 new, 0 done, 1 waiting for you")]
 
 
 def test_unanswered_items_stay_queued(tmp_path):
