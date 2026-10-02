@@ -12,7 +12,9 @@ _JB_STRING. We wrote none of its wording. We only fill its three slots:
   closing sentence kept word for word.
 
 The email carrying it is the demo's existing poisoned email (msg-004): only its body is replaced, the same
-slot the "Try your own injection" box writes to. The brain's warning stays on for this scenario.
+slot the "Try your own injection" box writes to. The request is the summarize one ("Read every email in my
+inbox ..."), so the brain reads the email, as AgentDojo's user tasks read their injection, and it is offered
+every tool, pay_invoice included. The brain's warning stays on for this scenario.
 """
 from __future__ import annotations
 

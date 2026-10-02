@@ -769,7 +769,9 @@ def test_published_attack_keeps_the_warning_on_and_uses_the_poisoned_email(tmp_p
     s = app.session(None)
     run = app.start_run(s, "agentdojo", unguarded=True, injection="MY OWN TEXT", background=False)
     start = run.events[0]["data"]
-    assert start["guarded"] and start["task"] == asst.SKILLS["triage"]
+    assert start["guarded"] and start["task"] == srv.SUMMARIZE_TASK
+    offered = {t["function"]["name"] for t in transports[0].requests[0]["body"]["tools"]}
+    assert "pay_invoice" in offered and "read_email" in offered       # it could take the bait
     assert start["published_attack"]["label"] == ad.LABEL and not start["custom_injection"]
     system = transports[0].requests[0]["body"]["messages"][0]["content"]
     assert asst.SYSTEM_GUARD in system                      # the box cannot remove the warning here
