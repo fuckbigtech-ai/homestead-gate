@@ -420,7 +420,7 @@ class _NoModelReviewer:
         return Verdict("invalid", f"{NO_MODEL_REASON}: you decide", "", "none (--no-model)", 0.0)
 
 
-ASSISTANT_REVIEWER = "nemotron-3-nano:4b"
+ASSISTANT_REVIEWER = "nemotron-3-nano:4b"      # the fallback when nothing is detected
 
 
 def _assistant_data(a) -> Path:
@@ -430,8 +430,13 @@ def _assistant_data(a) -> Path:
 def _assistant_seed(a, data: Path) -> None:
     from . import assistant as asst
     from .skills import ensure_skills_file
-    if asst.seed(data, model=a.model or ASSISTANT_REVIEWER):
+    model, why = a.model, ""
+    if not model:
+        pick = hardware.pick_assistant_reviewer(hardware.detect())
+        model, why = pick.model or ASSISTANT_REVIEWER, pick.reason
+    if asst.seed(data, model=model):
         print(f"seeded demo data (fake inbox, bills, memory, policy, skills) in {data}")
+        print(f"  reviewer: {model}" + (f": {why}" if why else ""))
     elif ensure_skills_file(data):
         print(f"wrote the default skills to {data / 'skills.toml'}")
 
@@ -441,7 +446,7 @@ def _assistant_reviewer(a, policy):
     if a.no_model:
         return _NoModelReviewer()
     hw = hardware.detect()
-    if not _fits(policy.model, hw, hardware.pick_reviewer(hw)):
+    if not _fits(policy.model, hw, hardware.pick_assistant_reviewer(hw)):
         return None
     return OllamaReviewer(policy.model, policy.ollama_url, policy.review_timeout_s)
 

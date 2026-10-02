@@ -46,7 +46,15 @@ class Reviewer:
 # guess cannot flip the 8GB Mac case.
 QWEN_9B = Reviewer("qwen3.5:9b", 6.6, 0.5, "30/30 attacks", "0/30 false blocks", "~3.5s")
 NEMOTRON_4B = Reviewer("nemotron-3-nano:4b", 2.8, 0.3, "30/30 attacks", "3/30 (10%) false blocks", "~2.3s")
-REVIEWERS = {r.model: r for r in (QWEN_9B, NEMOTRON_4B)}
+# nemotron-3-nano:30b: 24.27GB, the size of the tag's model layer in Ollama's registry manifest
+# (2026-10-02). It is a hybrid Mamba-Transformer with 3B active parameters, so its KV cache is small;
+# 0.5 per 8K is a deliberately generous guess. Not measured on GateBench: its strings say what was
+# measured instead (AgentDojo banking, bench/agentdojo/RESULTS.md).
+NEMOTRON_30B = Reviewer("nemotron-3-nano:30b", 24.3, 0.5, "AgentDojo banking: 0/144 attacks through",
+                        "0.69 legitimate calls blocked per run (hosted 30B)", "~5s")
+REVIEWERS = {r.model: r for r in (QWEN_9B, NEMOTRON_4B, NEMOTRON_30B)}
+# What the 4B costs on AgentDojo banking, said wherever the assistant picks it.
+NEMOTRON_4B_AGENTDOJO = "AgentDojo banking: 0/144 attacks through, but 4.09 legitimate calls blocked per run"
 
 Runner = Callable[[list[str]], str]
 
@@ -148,6 +156,24 @@ def pick_reviewer(hw: dict) -> Pick:
     return Pick(None, f"no measured reviewer fits: the smallest ({NEMOTRON_4B.model}) needs {need4}GB and this "
                 f"machine has {usable}GB usable for a model. The gate needs a local reviewer that fits, "
                 "so run it on a machine with more memory.")
+
+
+def pick_assistant_reviewer(hw: dict) -> Pick:
+    """The assistant's reviewer, both NVIDIA: nemotron-3-nano:30b if it fits comfortably, else
+    nemotron-3-nano:4b if it fits at all, else refuse. Each pick says what it costs, measured."""
+    v, need, usable = verdict(NEMOTRON_30B, hw)
+    if v == "comfortable":
+        return Pick(NEMOTRON_30B.model, f"fits comfortably ({need}GB needed of {usable}GB usable). "
+                    f"{NEMOTRON_30B.catch}, {NEMOTRON_30B.false_blocks}.", NEMOTRON_30B)
+    v4, need4, _ = verdict(NEMOTRON_4B, hw)
+    if v4 != "no":
+        tight = " It is a tight fit: close other apps while the assistant runs." if v4 == "tight" else ""
+        return Pick(NEMOTRON_4B.model,
+                    f"{NEMOTRON_30B.model} needs {need}GB and only {usable}GB is usable here, so the smaller "
+                    f"reviewer ({need4}GB). {NEMOTRON_4B_AGENTDOJO}, so it asks you far more often than the "
+                    f"30B (0.69).{tight}", NEMOTRON_4B)
+    return Pick(None, f"no measured reviewer fits: the smallest ({NEMOTRON_4B.model}) needs {need4}GB and this "
+                f"machine has {usable}GB usable for a model.")
 
 
 def describe(hw: dict) -> str:
