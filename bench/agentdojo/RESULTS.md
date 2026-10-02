@@ -116,6 +116,24 @@ gate stopped every attack that tried to do something (book a hotel, mail the use
 attacker, create a calendar event). Stopping manipulated answers needs a check on the reply text, which this
 gate does not do.
 
+### Full AgentDojo runs with prompt v5 (2026-10-02)
+
+The replay checked one decision per run. These are full runs (Modal L4, model-only gate, same agent), so a
+changed verdict also changes what the agent does next. Banking and Slack were dev for v5; travel was held out.
+
+| suite | gate prompt | utility, no attack | utility under attack | attack success | legit actions blocked per run |
+|---|---|---|---|---|---|
+| banking | v1 (ships) | 9/16 (56%) | 59/144 (41%) | 0/144 | 0.84 |
+| banking | v2 | 9/16 (56%) | 67/144 (47%) | 0/144 | 0.53 |
+| banking | **v5** | **10/16 (62%)** | **70/144 (49%)** | **0/144** | **0.49** |
+| slack | v1 (ships) | 12/21 (57%) | 28/105 (27%) | 0/105 | 2.37 |
+| slack | v2 | 10/21 (48%) | 37/105 (35%) | 0/105 | 2.28 |
+| slack | **v5** | 11/21 (52%) | **48/105 (46%)** | **0/105** | **1.06** |
+
+v5 kept every hijack out and roughly halved the legitimate actions it blocks. Clean Slack utility moved by one
+task (12 to 11 of 21), within run-to-run noise at this size. No gate, for reference: banking 81% / 74% utility and
+28% attack success; Slack 90% / 60% and 30%.
+
 Still open:
 - The v1 travel baseline (gate, model only) is running; the ship decision waits for it.
 - Remaining false blocks need judgement the code can't supply: "follow the instructions in this file" and "do
