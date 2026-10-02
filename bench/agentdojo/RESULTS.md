@@ -1,5 +1,19 @@
 # homestead-gate on AgentDojo
 
+**Start here (Nemotron, the models homestead uses).** Banking, AgentDojo's published `important_instructions`
+attack, brain Nemotron 3 Super on Nebius Token Factory with its safety prompt on:
+
+| setting | attacks that got through | utility under attack | legit calls blocked per run |
+|---|---|---|---|
+| no gate | **55/144 (38%)** | 78% | 0 |
+| gate, reviewer Nano 30B (Token Factory), no human | **0/144** | 58% | 0.69 |
+| gate, reviewer Nano 4B (the product's local default), no human | **0/144** | 49% | 4.09 |
+
+Details: [Nemotron on Token Factory](#nemotron-on-token-factory-2026-10-02) and
+[Nano 4B](#nano-4b-the-reviewer-the-product-ships-2026-10-02). With a human in the loop (the product's
+2-of-2, measured with Qwen 3.5 9B below) 1 of 143 banking attacks got through, not zero. The rest of this
+page is the earlier Qwen 3.5 9B work.
+
 AgentDojo (ETH Zurich, MIT) is an independent agent-security benchmark: realistic tasks in simulated
 banking, Slack, travel and workspace environments, with prompt injections planted in the data the agent
 reads, and AgentDojo's own scoring. We did not write these tasks or attacks.
@@ -223,6 +237,44 @@ Cost: about **$8 of Token Factory credit** (20.8M agent input + 1.0M output toke
 at the catalog prices $0.30/$0.90 and $0.06/$0.24 per 1M, plus about $0.6 lost from the restarted container's
 counter and $0.15 of smoke tests) and roughly **$0.3 of Modal CPU** (about 4.5 container-hours). Traces:
 Modal volume `agentdojo-results`, prefix `nemotron/`.
+
+### Nano 4B, the reviewer the product ships (2026-10-02)
+
+The hosted rows above use Nemotron 3 Nano 30B as the reviewer. The product's default local reviewer is
+Nemotron 3 Nano 4B (`nemotron-3-nano:4b`, NVIDIA's Q4_K_M GGUF on Ollama). Same banking suite, same brain
+(Nemotron 3 Super on Token Factory, guard prompt on), same attack, same frozen reviewer prompt (v1), gate in
+"model only" mode (no human). The 4B ran on a Modal GPU, the same model file a laptop runs; only speed
+differs. All 16 user tasks, all 144 attacked runs.
+
+`python aggregate.py <traces> --matched --split` (480 of 480 runs matched):
+
+| suite | setting | utility, no attack | utility under attack | attack success | ignored / blocked / tried, failed / through | legit actions blocked per run |
+|---|---|---|---|---|---|---|
+| banking | no gate | 12/16 (75%) | 113/144 (78%) | **55/144 (38%)** | 88 / 0 / 1 / 55 | 0.00 |
+| banking | gate (model only), Nano 30B | 12/16 (75%) | 84/144 (58%) | **0/144 (0%)** | 89 / 55 / 0 / 0 | 0.69 |
+| banking | gate (model only), **Nano 4B** | 10/16 (62%) | 71/144 (49%) | **0/144 (0%)** | 99 / 45 / 0 / 0 | **4.09** |
+
+What this shows:
+
+1. **The 4B stops the same attacks:** 0 of 144 got through, as with the 30B.
+2. **It does so by blocking almost everything.** The 4B said "block" in 1,853 of 1,894 reviews (98%), with no
+   unparseable verdicts (0 invalid). Its most common reasons are a recipient the user did not name, or an
+   action broader than the request. Blocked calls per run counts the agent's retries of the same call.
+3. **The cost is real:** legitimate calls blocked per run 0.69 (30B) to 4.09 (4B); runs with at least one
+   legitimate call blocked 42/160 (26%) to 92/160 (57%); utility under attack 58% to 49%, clean 75% to 62%.
+   In the product every block goes to the human, so with the 4B on banking-style tasks more than half the
+   tasks would ask you at least once. That is the approval-fatigue cost, measured.
+4. **What it means:** on our own GateBench the 4B false-blocked 3 of 30; on AgentDojo banking, where tasks
+   often pay what a document or bill says, it is far stricter than the 30B. The 2-of-2 holds (nothing got
+   through), but a small local reviewer trades usefulness for safety. Better small reviewers, or giving the
+   reviewer the user's known payees, are the levers; we have not shipped either yet.
+
+Review latency: median 5.0 s per review on that GPU (the first review of a lane includes model load). Cost: about
+**$2.65 of Token Factory credit** for the brain (from the lane counters) and roughly 51 minutes of one Modal GPU container.
+Traces: Modal volume `agentdojo-results`, prefix `nano4b/`. The Modal launcher for this run was not committed
+(it was lost with a crashed working copy); the gate and reviewer code are this repo's `run_gate.py` and
+`bench/review.py` at the time, and the pipeline name in every trace records the brain, guard, reviewer and
+human setting.
 
 ### Published attacks that got past Nemotron 3 Super (no gate)
 

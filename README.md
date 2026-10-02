@@ -17,7 +17,9 @@ yes. The cloud does the thinking. Your machine has the veto. The cloud can't vot
 - **Measured, not claimed:** on [AgentDojo](bench/agentdojo/RESULTS.md) (ETH Zurich's benchmark for hijacked
   agents), Nemotron 3 Super with its own safety prompt made the attacker's banking transfer in **55 of 144**
   attacked runs (38%). With the gate (Nano 30B reviewer), **0 of 144**. Travel: 11 of 119 to 0. The cost is
-  published next to it: banking tasks finished under attack fell from 78% to 58%.
+  published next to it: banking tasks finished under attack fell from 78% to 58%. The 4B local reviewer also
+  let 0 of 144 through, but it is much stricter (4.09 legitimate calls blocked per run, against 0.69), so it
+  asks you far more often. With a human in the loop, 1 of 143 banking attacks got through, not zero.
 - **Receipts you can check:** every request, verdict and decision is written to a hash chain before anything
   runs; edit one record and `homestead-gate watch` shows the line where the chain breaks.
 
