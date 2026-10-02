@@ -252,6 +252,29 @@ A cloud model that ignores the poisoned email never reaches the gate. To show th
 a model that obeys it, `--unguarded-prompt` removes the warning about email instructions from
 the system prompt. Our demo recordings say when they use it.
 
+#### Web demo (demo mode)
+
+`demo/web` runs the same Assistant and Gate behind a phone-sized page: pick a task (or write your
+own poisoned email), watch each step, answer the approval card, then verify the receipts and see
+a tampered copy fail.
+
+```bash
+export NEBIUS_API_KEY=...
+PYTHONPATH=src python -m demo.web.server                   # http://127.0.0.1:8000
+DEMO_BRAIN=scripted DEMO_REVIEWER=scripted PYTHONPATH=src python -m demo.web.server   # offline, no models
+DEMO_REVIEWER=ollama OLLAMA_URL=https://...modal.run PYTHONPATH=src python -m demo.web.server   # Nano 4B on a Modal GPU
+```
+
+**Demo mode is not the product.** On the page, approval is a button and the reviewer is Nemotron
+Nano 30B on Nebius Token Factory, so visitors need no GPU. In the product the reviewer runs on your
+machine and approval happens only in the terminal you started the gate in; there is no approve
+button on the network. The web approver lives only in `demo/web`, and a test fails if anything in
+`src/homestead_gate` can import it. GateBench numbers were measured on the local reviewers, not on
+the hosted Nano 30B. Each browser session gets its own data and receipts, deleted after an hour.
+Runs are rate limited (5 per page and 20 in total per hour by default) with a token budget per run.
+Email is never sent and payments are unsigned. `demo/web/modal_app.py` would host it on Modal; it
+has not been deployed.
+
 ### What it does not defend against
 
 - **An agent that can reach your accounts some other way.** If the agent has your SMTP password,
