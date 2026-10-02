@@ -155,6 +155,43 @@ def replay(prompts: list[str]) -> dict:
     return out
 
 
+NANO4B_GGUF, NANO4B = "hf.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M", "nemotron-3-nano:4b"
+items_image = image.add_local_file(HERE / "hosted.py", "/root/bench/agentdojo/hosted.py")
+
+
+@app.function(gpu="L4", timeout=40 * 60, image=items_image)
+def replay_items(items: list, prompt: str) -> dict:
+    """Re-review pre-extracted items (replay.py --dump-items) with Nemotron 3 Nano 4B, set up as in the
+    nano4b/ banking run: the NVIDIA GGUF pulled and copied to nemotron-3-nano:4b (no Modelfile), Ollama
+    with a 16k context. No traces needed in the container."""
+    import os, subprocess, time, urllib.request
+    t0 = time.time()
+    env = dict(os.environ, OLLAMA_CONTEXT_LENGTH="16384", OLLAMA_KEEP_ALIVE="60m")
+    subprocess.Popen("ollama serve > /tmp/ollama.log 2>&1", shell=True, env=env)
+    for _ in range(60):
+        try:
+            urllib.request.urlopen("http://127.0.0.1:11434/api/version", timeout=2); break
+        except Exception:
+            time.sleep(2)
+    for _ in range(4):
+        if subprocess.run(f"ollama pull {NANO4B_GGUF}", shell=True).returncode == 0:
+            break
+        time.sleep(60)
+    else:
+        raise SystemExit(f"could not pull {NANO4B_GGUF}")
+    subprocess.run(f"ollama cp {NANO4B_GGUF} {NANO4B}", shell=True, check=True)
+    meta = {"ollama": subprocess.run("ollama --version", shell=True, capture_output=True, text=True).stdout.strip(),
+            "blobs": sorted(p.name for p in Path("/root/.ollama/models/blobs").iterdir())}
+    Path("/tmp/items.json").write_text(json.dumps(items))
+    t1 = time.time()
+    r = subprocess.run(["python", "/root/bench/agentdojo/replay.py", "--items", "/tmp/items.json", "--prompt", prompt,
+                        "--model", NANO4B, "--out", f"/tmp/replay_{prompt}.json"], capture_output=True, text=True)
+    print(prompt, r.stdout[-600:], r.stderr[-600:], flush=True)
+    rows = json.loads(Path(f"/tmp/replay_{prompt}.json").read_text()) if r.returncode == 0 else None
+    return {"prompt": prompt, "rows": rows, "error": None if rows is not None else r.stderr[-2000:], "meta": meta,
+            "setup_min": round((t1 - t0) / 60, 2), "total_min": round((time.time() - t0) / 60, 2)}
+
+
 @app.function(gpu="L4", timeout=3 * 3600)
 def gatebench(prompts: list[str], repeats: int = 3, split: str = "test") -> dict:
     """GateBench frozen test split (v0.1 harness, 60 cases) and the multi-step family, per prompt."""
@@ -178,7 +215,19 @@ def gatebench(prompts: list[str], repeats: int = 3, split: str = "test") -> dict
 @app.local_entrypoint()
 def main(suite: str = "workspace", chunks: int = 4, smoke: bool = False, replay_prompts: str = "",
          gatebench_prompts: str = "", settings: str = "", split: str = "test", nemotron: bool = False,
-         lanes: int = 4, cost_cap: float = 1.2, tasks: str = "", prefix: str = "nemotron"):
+         lanes: int = 4, cost_cap: float = 1.2, tasks: str = "", prefix: str = "nemotron", replay_items_file: str = "",
+         replay_out: str = ""):
+    if replay_items_file:
+        # Nano 4B re-review of items from `replay.py ... --dump-items F`, one L4 container per prompt:
+        # modal run bench/agentdojo/modal_run.py --replay-items-file F --replay-prompts v1,v2,v5 --replay-out DIR
+        its = json.loads(Path(replay_items_file).read_text())
+        out = Path(replay_out or RUNS)
+        out.mkdir(parents=True, exist_ok=True)
+        for res in replay_items.map([its] * len(replay_prompts.split(",")), replay_prompts.split(",")):
+            (out / f"replay4b_{res['prompt']}.json").write_text(json.dumps(res, indent=1))
+            print(res["prompt"], res["meta"], "setup", res["setup_min"], "min, total", res["total_min"], "min",
+                  "ERROR " + res["error"][-500:] if res["error"] else "", flush=True)
+        return
     if nemotron:
         # modal run bench/agentdojo/modal_run.py --nemotron --suite banking,travel --lanes 4
         # --tasks user_task_0 (smoke) restricts the user tasks. Results: agentdojo-results/<prefix>/<suite>/
