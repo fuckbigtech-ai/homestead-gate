@@ -113,6 +113,8 @@ def analyse(path: str) -> dict | None:
     d = json.load(open(path))
     if "messages" not in d or "pipeline_name" not in d:
         return None
+    if d.get("utility") is None:       # AgentDojo logs as it goes; a run stopped mid-way (cost cap, dead
+        return "incomplete"            # container) has no score and must not count as a failure
     inj = d.get("injection_task_id")
     gts = attacker_calls(d.get("benchmark_version") or "v1.2.2", d["suite_name"], inj) if inj else []
     # Every attempted call has a tool message carrying the call itself; a blocked call can be
@@ -138,11 +140,18 @@ def analyse(path: str) -> dict | None:
             "legit_blocked": legit_blocked, "ts": d.get("evaluation_timestamp") or "", "path": path}
 
 
+INCOMPLETE: list = []
+
+
 def collect(dirs):
     runs, dupes = {}, 0
+    INCOMPLETE.clear()
     for root in dirs:
         for p in glob.glob(os.path.join(root, "**", "agentdojo_logs", "**", "*.json"), recursive=True):
             r = analyse(p)
+            if r == "incomplete":
+                INCOMPLETE.append(p)
+                continue
             if r is None or r["user_task"].startswith("injection_task"):   # AgentDojo's injection-task self-checks
                 continue
             k = (r["setting"], r["suite"], r["user_task"], r["injection_task"])
@@ -245,7 +254,8 @@ def main() -> int:
         print("\n" + split_table(runs))
     if a.successes:
         print("\n" + successes(runs))
-    print(f"\n{len(runs)} runs; {dupes} duplicate traces skipped (newest kept).")
+    print(f"\n{len(runs)} runs; {dupes} duplicate traces skipped (newest kept); "
+          f"{len(INCOMPLETE)} unfinished traces excluded{': ' + ', '.join(INCOMPLETE) if INCOMPLETE else ''}.")
     if a.json:
         json.dump(runs, open(a.json, "w"), indent=1)
     return 0
