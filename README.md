@@ -275,6 +275,55 @@ Runs are rate limited (5 per page and 20 in total per hour by default) with a to
 Email is never sent and payments are unsigned. `demo/web/modal_app.py` would host it on Modal; it
 has not been deployed.
 
+### Threat model
+
+Who can attack, what they can do, and what stops them. "Outbound action" means anything that leaves your
+machine on your behalf: an email, a message, a payment, a wallet transaction.
+
+| attacker | what they can do | what stops them | what does not |
+|---|---|---|---|
+| **Anyone who can put text in front of the agent** (an email, a web page, a tool result, a skill) | Steer the agent into an outbound action you did not ask for | The gate sees the exact action, what you asked for and what the agent read. A recipient, account or link you never named, or data you did not ask to send, is flagged and waits for you | Text that only changes what the agent *tells you* (a fake recommendation): no action, so the gate never sees it |
+| **A compromised cloud model** (the brain itself is hostile) | Propose any action, invent arguments, retry | Same gate, same rules: the brain has a submit function, not the gate. Denied actions can't be retried, a run gets 4 outbound actions, unknown tools are refused, extra fields are dropped | The brain can lie in its summary to you. Read the receipts, not the summary |
+| **A compromised or wrong local reviewer** | Approve something it should not | It is only one of two keys: anything flagged, anything not allowlisted, any calldata, any payment you never asked for, and any spend over the daily cap still needs you | A reviewer that approves an allowlisted, in-cap payment you did ask for, to the payee you named. That is the one path the policy lets through without you |
+| **Someone replaying an old approval** | Reuse a "yes" for a different action | Each approval is bound to the exact typed action and the policy version that judged it; a changed field is a new request | |
+| **Someone with your files** | Edit, delete or rebuild the receipt log | Every record holds the hash of the one before it, so an edit breaks the chain at that line (`homestead-gate watch` exits 1) | Deleting the newest records or rebuilding the whole log. Sign a checkpoint (`hsm checkpoint ~/.homestead-gate/ledger`) and keep it where they can't write |
+| **An agent going around the gate** | Use your SMTP password or a wallet key directly | `homestead-gate run` sandboxes the agent: it can reach the gate, the local model and the hosts you allow, and it can't read your SSH keys, cloud credentials or `.env` files. The gate holds the email credentials, not the agent | Anything sent to a host you allowed |
+
+How well it works, measured on outside benchmarks, is in [bench/agentdojo/RESULTS.md](bench/agentdojo/RESULTS.md):
+without a gate, 28 to 36% of the attacks that try an action succeed on AgentDojo's banking, Slack and travel
+suites; with the gate (model only, no human), none did. The cost is that it also blocks some legitimate work, and
+those numbers are in the same file.
+
+### FAQ
+
+**How is this different from a sandbox (bubblewrap, gVisor, OpenShell)?** A sandbox decides what an agent can
+*reach*. It can't tell "pay my plumber" from "pay the attacker", because both are the same call to the same
+host. The gate judges each action against what you asked for. Use both: `homestead-gate run` is the sandbox,
+the gate is the layer that reads the action.
+
+**Isn't a model guarding a model just more guardrails?** That is why it is 2-of-2. The local model is one key and
+you are the other. When the model is unsure or flags something, nothing happens until you decide, and the
+policy (allowlists, a daily spending cap, calldata always to a human, no payment you never asked for) holds no
+matter what either model says.
+
+**Why not just ask me to confirm everything?** People approve on reflex after the tenth prompt. The gate asks only
+when the model flags an action or a rule requires it (calldata, a payment you never asked for, spending over the
+cap). It still asks too often on some kinds of task, such as "do what this file says": on AgentDojo's banking
+tasks it flagged most of the actions it reviewed. Cutting that without letting attacks through is the open
+problem, and the attempts so far are in the results.
+
+**Where is the methodology?** GateBench's cases, prompt, run files and scorer are in [bench/](bench/), with a
+frozen test split scored on both sides (attacks caught and legitimate actions blocked). The AgentDojo runs use
+ETH Zurich's own tasks, attacks and scoring; the merge script recomputes every number from the traces, and the
+write-up keeps the failed attempts (prompt v3 and v4 failed our held-out check, v5 did not beat v1 on travel).
+
+**Does it phone home?** No. The gate, its reviewer and the receipts run on your machine. The only network
+calls are the ones you configure: the cloud brain (Nebius Token Factory or NVIDIA NIM) and the email server
+you give it. The gate sends no telemetry.
+
+**Who is it for?** Anyone letting an AI assistant touch their email or money: the person who wants the
+assistant to pay bills and answer mail, and doesn't want one poisoned email to empty the inbox to a stranger.
+
 ### What it does not defend against
 
 - **An agent that can reach your accounts some other way.** If the agent has your SMTP password,
