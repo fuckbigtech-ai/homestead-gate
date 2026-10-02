@@ -347,11 +347,11 @@ def _replay_think(items: list, which: str, modes: list[str], probe: int, gpu: st
         time.sleep(30)
         vol.commit()
     vol.commit()
-    log = Path("/tmp/replay.log").read_text()
+    log = Path("/tmp/replay.log").read_text(errors="replace")
     print(log[-2500:], flush=True)
     rows = json.loads(Path(dest).read_text()) if Path(dest).exists() else None
     return {"which": which, "meta": meta, "rows": rows, "error": None if p.returncode == 0 else log[-3000:],
-            "log_tail": log[-1500:], "ollama_log_tail": Path("/tmp/ollama.log").read_text()[-3000:],
+            "log_tail": log[-1500:], "ollama_log_tail": Path("/tmp/ollama.log").read_text(errors="replace")[-3000:],
             "setup_min": round((t1 - t0) / 60, 2), "total_min": round((time.time() - t0) / 60, 2)}
 
 
@@ -399,7 +399,11 @@ def main(suite: str = "workspace", chunks: int = 4, smoke: bool = False, replay_
         fns = {"4b": replay_think_l4, "30b": replay_think_l40s}
         calls = [(w, fns[w].spawn(its, w, modes, probe)) for w in replay_think.split(",")]
         for w, c in calls:
-            res = c.get()
+            try:
+                res = c.get()
+            except Exception as e:                       # e.g. timeout: rows so far are on the volume
+                print(w, "FAILED", type(e).__name__, str(e)[:500], flush=True)
+                continue
             (out / f"replay_think_{'probe_' if probe else ''}{w}.json").write_text(json.dumps(res, indent=1))
             print(w, res["meta"].get("gpu"), res["meta"].get("ollama"), "setup", res.get("setup_min"), "min, total",
                   res.get("total_min"), "min", "ERROR " + res["error"][-800:] if res["error"] else "", flush=True)
