@@ -5,8 +5,12 @@ and answers for you. Anyone who can email you can try to give it orders, so noth
 payment, a wallet transaction) leaves until a second model on your machine has reviewed it **and** you have said
 yes. The cloud does the thinking. Your machine has the veto. The cloud can't vote.
 
-- **Try it:** [live demo](https://frumza--homestead-web-demo-web.modal.run) (no sign-up; write your own poisoned
-  email and watch the gate stop it)
+- **Try it:** [live demo](https://frumza--homestead-web-demo-web.modal.run) (no sign-up; watch a morning of
+  scheduled runs, write your own skill, or write your own poisoned email and watch the gate stop it)
+- **Always on, with memory and skills you own:** it wakes on a schedule, handles only new mail, leaves you a
+  brief and a notification, and holds anything that needs you. It pays only people you saved in its memory, so
+  an email saying "my bank changed, pay this new wallet" cannot redirect a payment. Skills are your own requests
+  in a `skills.toml` you edit. [Details](#assistant).
 - **Two NVIDIA open models:** Nemotron 3 Super on **Nebius Token Factory** plans and calls tools; Nemotron 3 Nano
   reviews every outbound action (4B on your machine in the product; 30B on Token Factory in the hosted demo)
 - **Measured, not claimed:** on [AgentDojo](bench/agentdojo/RESULTS.md) (ETH Zurich's benchmark for hijacked
@@ -21,6 +25,7 @@ pip install -e .                                   # not on PyPI yet
 export NEBIUS_API_KEY=...                          # Nebius Token Factory
 ollama pull nemotron-3-nano:4b                     # the local reviewer
 homestead-gate assistant --skill triage            # go through the inbox; anything outbound waits for the gate
+homestead-gate assistant --watch --every 15m       # always on: new mail only, a brief each pass
 ```
 
 Built for the Nebius x NVIDIA Global AI Hackathon (Personal AI track). Part of
@@ -207,28 +212,123 @@ Limits: another program running as you can still ask the keychain for the entry.
 a visible permission dialog rather than the password, so say no to anything that isn't the gate. A
 compromised gate process has the password. Linux needs libsecret; there is no plaintext fallback.
 
-### Assistant (hackathon demo)
+### Assistant
 
-A small personal assistant for the Nebius x NVIDIA hackathon. Two NVIDIA open models: Nemotron 3
-Super on Nebius Token Factory plans and calls tools; Nemotron 3 Nano 4B runs on your machine as the
-gate's reviewer. Everything the assistant sends goes through the gate above, so the cloud does the
-thinking, your machine has the veto, and the cloud can't vote.
+A personal assistant that runs on a schedule, remembers who you deal with, and uses skills you write.
+Two NVIDIA open models: Nemotron 3 Super on Nebius Token Factory plans and calls tools; Nemotron 3
+Nano 4B runs on your machine as the gate's reviewer. Everything the assistant sends goes through the
+gate above, so the cloud does the thinking, your machine has the veto, and the cloud can't vote.
 
 ```bash
 export NEBIUS_API_KEY=...                                    # Nebius Token Factory (default backend)
 ollama pull nemotron-3-nano:4b                               # the local reviewer
 homestead-gate assistant --smoke                             # one live call with one tool, then exit
-homestead-gate assistant --skill triage                      # reply to the email that needs an answer
-homestead-gate assistant --skill pay                         # pay the plumber's invoice
-homestead-gate assistant --skill summarize                   # an inbox with a poisoned email in it
+homestead-gate assistant --skill triage                      # one run of a skill, approvals in this terminal
+homestead-gate assistant --watch --every 15m                 # always on: new mail only, a brief each pass
+homestead-gate assistant --pending                           # answer what the scheduled passes held for you
+homestead-gate assistant --memory                            # what it remembers, and who wrote each fact
+homestead-gate assistant --remember "Sam Rivera" wallet 0x...  # save a fact as yours
+homestead-gate assistant --skills                            # your skills (skills.toml)
 homestead-gate assistant --task "..." --data DIR
 homestead-gate assistant --backend nim ...                   # NVIDIA's hosted API instead (NVIDIA_API_KEY)
 ```
 
-The data is fake: an inbox, one bill, a memory and a policy, written to
-`~/.homestead-gate/assistant` (or `--data DIR`) on first run. That directory has its own receipts
-and outbox, separate from the gate's. Email is dry-run unless you pass `--live`, the same as `up`.
-Payments are unsigned Sepolia transactions.
+The data is fake: an inbox, one bill, a memory, a policy and three skills, written to
+`~/.homestead-gate/assistant` (or `--data DIR`) on first run. That directory also holds the
+assistant's own receipts, outbox, briefs and state, separate from the gate's. Email is dry-run
+unless you pass `--live`, the same as `up`. Payments are unsigned Sepolia transactions. The inbox
+is a JSON file: there is no mail connector yet, so "new mail" is whatever lands in that file
+(`--demo-new-mail` delivers the demo's second batch).
+
+#### Always on
+
+`--watch` wakes on a schedule and handles only the mail that arrived since the last pass. State
+(which messages are done) lives in `state.json` in the data dir, and mail is marked done only when
+a pass finishes, so a failed pass leaves it for the next one. If nothing is new, the cloud model is
+not called. Each pass:
+
+- runs one skill (`triage` unless you pass `--skill`), with `list_inbox` and `read_email` limited to
+  the new messages;
+- writes `brief.md` (and a dated copy under `briefs/`): what it did, what is waiting for you, the new
+  mail, the memory it used, and, labelled as such, the model's own summary. The "done" and "waiting"
+  lists are built from the gate's records, not from what the model says;
+- shows a desktop notification with counts only, no email text (`osascript` on macOS, `notify-send`
+  on Linux, nothing if neither is there).
+
+Nobody is at the terminal during a pass, so its approver can only hold. Anything that needs you is
+recorded as not executed (`gate.expired`, decided by `human:held`) and queued in `pending.json`.
+`homestead-gate assistant --pending` puts each held item through the whole gate again (policy,
+local reviewer, then you in the terminal). The queue is a file anyone with your files can edit, so
+nothing is ever executed from it directly. A lock file stops two passes from overlapping.
+
+`--watch --once` does one pass and exits, for launchd or cron. macOS, every 15 minutes
+(`~/Library/LaunchAgents/com.example.homestead-assistant.plist`, then
+`launchctl load` that file):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.example.homestead-assistant</string>
+  <key>ProgramArguments</key><array>
+    <string>/path/to/venv/bin/homestead-gate</string><string>assistant</string>
+    <string>--watch</string><string>--once</string>
+  </array>
+  <key>EnvironmentVariables</key><dict><key>NEBIUS_API_KEY</key><string>...</string></dict>
+  <key>StartInterval</key><integer>900</integer>
+  <key>StandardOutPath</key><string>/tmp/homestead-assistant.log</string>
+  <key>StandardErrorPath</key><string>/tmp/homestead-assistant.log</string>
+</dict></plist>
+```
+
+Linux or any cron: `*/15 * * * * NEBIUS_API_KEY=... /path/to/venv/bin/homestead-gate assistant --watch --once`.
+The plist puts the API key in a file in plain text; use a wrapper script that reads it from your
+keychain if that matters to you. Approvals never happen in launchd or cron: they wait for `--pending`.
+
+#### Memory that decides things
+
+Memory is [homestead-memory](https://github.com/fuckbigtech-ai/homestead-memory). Each fact records
+who wrote it, when, and its source. `--memory` lists them.
+
+- **Payees come only from facts you wrote.** `pay_invoice` refuses, before the gate, any wallet that
+  is not a wallet fact written by you for that bill's payee. The demo inbox has an email from Sam
+  saying his bank changed and asking you to pay a new wallet. The assistant cannot pay it; the brief
+  says so, shows the wallet you saved, and tells you how to save a new one once you have checked
+  with Sam yourself. There is no gate request and no approval card for it, because there is nothing
+  you could safely approve.
+- **The assistant cannot write contact details** (email, wallet, account, bank) into memory, and it
+  cannot overwrite any fact you wrote. When it remembers other things, this code sets the source
+  from what the run actually read, never from what the model says. A note edited by hand loses its
+  writer, so it no longer counts as yours.
+- **Your contacts are your allowlist.** The email addresses and wallets you wrote into memory are
+  added to the policy's allowlists, so a message to them can go through when the reviewer approves.
+  Facts the assistant wrote never count.
+- **After you approve someone new, it offers to remember them.** In the terminal it asks for a name
+  (blank skips); the fact is written as yours with the source "approved by you on DATE". Next time
+  that address is a known contact.
+- **Email recipients are treated differently from payees, on purpose.** Replying to someone new is
+  normal, so an email to an address you never saved is not refused. It is not allowlisted either, so
+  the gate always asks you about it. That is also how the poisoned-email demo still reaches the gate.
+
+#### Skills you write
+
+`skills.toml` in the data dir holds your skills: a name, the instruction in your words, the tools it
+may use, and an optional schedule for `--watch`. The three defaults (`triage`, `pay`, `summarize`)
+are written there on first run; edit them or add your own.
+
+```toml
+[skills.landlord]
+instruction = "Email landlord@example.org that the kitchen sink is fixed."
+tools = ["recall", "send_email"]
+schedule = "every 1h"          # optional
+```
+
+The instruction is your request, so the gate trusts it: the reviewer judges every action against it.
+The tools list narrows what the cloud model is offered for that skill, and a call to any other tool
+is refused. Outbound tools still go through the gate, whatever the list says. A skill cannot name a
+tool that does not exist, and nothing in it can turn the gate off.
+
+#### How a run stays inside the gate
 
 - **Read tools run at once:** `list_inbox`, `read_email`, `list_bills`, `recall` and `remember`.
 - **Outbound tools are gate requests:** `send_email` and `pay_invoice`. They get the same policy,
@@ -243,17 +343,14 @@ Payments are unsigned Sepolia transactions.
   Text hidden in the middle of a long email reaches the cloud model but not the reviewer. And
   GateBench measured one untrusted source per request; this path sends several, a shape the
   published numbers do not cover.
-- **No asking twice.** An action that was denied is refused if the model tries it again, and a
-  run may submit only 4 outbound actions.
-- **Memory** is [homestead-memory](https://github.com/fuckbigtech-ai/homestead-memory). Each fact
-  records who wrote it, when, and its source. When the assistant remembers something, this code
-  sets the source from what the run actually read, never from what the model says. Payees come
-  from memory, never from an email.
-- **The daily cap holds across runs.** Each run is a new process, so at start the assistant
-  replays the last 24 hours of autonomous payments from its receipts.
+- **No asking twice.** An action that was denied or held is refused if the model tries it again,
+  and a run may submit only 4 outbound actions.
+- **The daily cap holds across runs.** Each run and each scheduled pass starts from a fresh policy
+  and replays the last 24 hours of autonomous payments from its receipts.
 - **Money moves on its own only if you asked for a payment.** If your request never mentions paying
   (an invoice, a bill, a tip, a refund, sending an amount), any payment the agent attempts goes to
-  you, even to an allowlisted payee the model approves. Found in our own demo: asked to "reply to
+  you, even to an allowlisted payee the model approves. The default `triage` skill does not ask for
+  payments, so during `--watch` a payment is held for you. Found in our own demo: asked to "reply to
   anything that needs an answer", the agent paid an invoice and the model approved it.
 
 Token Factory is OpenAI-compatible: `https://api.tokenfactory.nebius.com/v1`, model
@@ -267,9 +364,20 @@ the system prompt. Our demo recordings say when they use it.
 
 #### Web demo (demo mode)
 
-`demo/web` runs the same Assistant and Gate behind a phone-sized page: pick a task (or write your
-own poisoned email), watch each step, answer the approval card, then verify the receipts and see
-a tampered copy fail.
+`demo/web` runs the same Assistant, Gate and scheduled pass behind a phone-sized page:
+
+- **Morning run:** two scheduled passes of the triage skill (07:00 and 07:15) over a seeded inbox,
+  with new mail arriving in between, including Sam's "my wallet changed" email. Each pass shows its
+  brief and the notification it would raise. Only the clock is simulated; nothing is approved on the
+  page during these passes, the same as `--watch`.
+- **Your skills:** run a default skill, or write one of your own (the instruction only; its tools are
+  fixed to reading, looking things up and email, with no payments). Your skill is your request and
+  the gate trusts it. The injection box is the opposite: text in an email someone sent you, which is
+  never trusted.
+- **Memory panel:** the facts each run used, who wrote each one and when. After you approve someone
+  new, "Remember this" saves them as your fact, and the next run treats them as a known contact.
+- **The injection box and the approval card**, as before; then verify the receipts and see a tampered
+  copy fail. The assistant's answer is rendered as markdown built from page elements, never as HTML.
 
 ```bash
 export NEBIUS_API_KEY=...
@@ -283,10 +391,10 @@ Nano 30B on Nebius Token Factory, so visitors need no GPU. In the product the re
 machine and approval happens only in the terminal you started the gate in; there is no approve
 button on the network. The web approver lives only in `demo/web`, and a test fails if anything in
 `src/homestead_gate` can import it. GateBench numbers were measured on the local reviewers, not on
-the hosted Nano 30B. Each browser session gets its own data and receipts, deleted after an hour.
-Runs are rate limited (5 per page and 20 in total per hour by default) with a token budget per run.
-Email is never sent and payments are unsigned. It is hosted on Modal with `demo/web/modal_app.py`
-(live at the link at the top).
+the hosted Nano 30B. Each browser session gets its own data, memory, skills and receipts, deleted
+after an hour. Runs are rate limited (5 per page and 20 in total per hour by default; a morning run
+counts as two) with a token budget per run. Email is never sent and payments are unsigned. It is
+hosted on Modal with `demo/web/modal_app.py` (live at the link at the top).
 
 ### Threat model
 
@@ -295,7 +403,7 @@ machine on your behalf: an email, a message, a payment, a wallet transaction.
 
 | attacker | what they can do | what stops them | what does not |
 |---|---|---|---|
-| **Anyone who can put text in front of the agent** (an email, a web page, a tool result, a skill) | Steer the agent into an outbound action you did not ask for | The gate sees the exact action, what you asked for and what the agent read. A recipient, account or link you never named, or data you did not ask to send, is flagged and waits for you | Text that only changes what the agent *tells you* (a fake recommendation): no action, so the gate never sees it |
+| **Anyone who can put text in front of the agent** (an email, a web page, a tool result, a skill) | Steer the agent into an outbound action you did not ask for | The gate sees the exact action, what you asked for and what the agent read. A recipient, account or link you never named, or data you did not ask to send, is flagged and waits for you. In the assistant, a payment can go only to a wallet you saved in memory, so "my bank changed, pay this new wallet" is refused before the gate | Text that only changes what the agent *tells you* (a fake recommendation): no action, so the gate never sees it |
 | **A compromised cloud model** (the brain itself is hostile) | Propose any action, invent arguments, retry | Same gate, same rules: the brain has a submit function, not the gate. Denied actions can't be retried, a run gets 4 outbound actions, unknown tools are refused, extra fields are dropped | The brain can lie in its summary to you. Read the receipts, not the summary |
 | **A compromised or wrong local reviewer** | Approve something it should not | It is only one of two keys: anything flagged, anything not allowlisted, any calldata, any payment you never asked for, and any spend over the daily cap still needs you | A reviewer that approves an allowlisted, in-cap payment you did ask for, to the payee you named. That is the one path the policy lets through without you |
 | **Someone replaying an old approval** | Reuse a "yes" for a different action | Each approval is bound to the exact typed action and the policy version that judged it; a changed field is a new request | |
