@@ -164,7 +164,7 @@ def test_second_pass_sees_only_new_mail_and_refuses_the_new_wallet(tmp_path):
     assert f"Pay 0.02 ETH to {asst.NEW_WALLET}: not done, refused before the gate" in waiting
     assert f"The wallet you saved: {asst.SAM_WALLET} (written by you; added by you on 2026-09-22)" in waiting
     assert f'Email {DENTIST}, "Re: Cleaning on Tuesday": held for your yes' in waiting
-    assert "## Memory it used" in brief and f"Sam Rivera, wallet: {asst.SAM_WALLET} (written by you at" in brief
+    assert "## Memory it used" in brief and f"Sam Rivera, wallet: {asst.SAM_WALLET} (written by you; added by you on 2026-09-22)" in brief
     assert shown == [("homestead", "2 new, 0 done, 2 waiting for you")]
     pend = always_on.load_pending(data)
     assert pend[0]["action"]["to"] == DENTIST and pend[0]["task"] == asst.SKILLS["triage"]

@@ -316,8 +316,9 @@ def render_brief(p: Pass, last_run: str | None = None) -> str:
         lines += ["", "## Memory it used"]
         for f in p.facts_used:
             who = "you" if f.get("written_by") == asst.USER else (f.get("written_by") or "unknown")
+            dated = any(ch.isdigit() for ch in str(f.get("source") or ""))
             lines.append(f"- {f['entity']}, {f['field']}: {f['value']} (written by {who}"
-                         + (f" at {str(f['at'])[:16].replace('T', ' ')}" if f.get("at") else "")
+                         + (f" at {str(f['at'])[:16].replace('T', ' ')}" if f.get("at") and not dated else "")
                          + f"; {f['source']})")
     if p.final:
         lines += ["", "## In the assistant's words", "",
