@@ -322,19 +322,26 @@ def test_request_shape_and_tool_messages(tmp_path):
     assert out["steps"][2]["result"] == {"error": "arguments were not valid JSON"}
 
 
-def test_tokenfactory_placeholder_refuses_to_send(monkeypatch):
+def test_placeholder_refuses_to_send(monkeypatch):
     monkeypatch.delenv("HG_TOKENFACTORY_BASE_URL", raising=False)
     monkeypatch.delenv("HG_TOKENFACTORY_MODEL", raising=False)
     t = ScriptedLLM(done())
-    llm = ChatClient.from_preset("tokenfactory", api_key=KEY, transport=t)
+    llm = ChatClient.from_preset("tokenfactory", base_url="TODO-base-url", api_key=KEY, transport=t)
     with pytest.raises(LLMError, match="TODO"):
         llm.chat([{"role": "user", "content": "x"}])
     assert not t.requests and PRESETS["tokenfactory"].key_env == "NEBIUS_API_KEY"
+
+
+def test_tokenfactory_preset_and_overrides(monkeypatch):
+    monkeypatch.delenv("HG_TOKENFACTORY_BASE_URL", raising=False)
+    monkeypatch.delenv("HG_TOKENFACTORY_MODEL", raising=False)
+    t = ScriptedLLM(done(), done())
+    ChatClient.from_preset("tokenfactory", api_key=KEY, transport=t).chat([{"role": "user", "content": "x"}])
+    assert t.requests[0]["url"] == "https://api.tokenfactory.nebius.com/v1/chat/completions"
     monkeypatch.setenv("HG_TOKENFACTORY_BASE_URL", "https://tf.example/v1")
     monkeypatch.setenv("HG_TOKENFACTORY_MODEL", "nvidia/some-model")
-    llm = ChatClient.from_preset("tokenfactory", api_key=KEY, transport=t)
-    llm.chat([{"role": "user", "content": "x"}])
-    assert t.requests[0]["url"] == "https://tf.example/v1/chat/completions"
+    ChatClient.from_preset("tokenfactory", api_key=KEY, transport=t).chat([{"role": "user", "content": "x"}])
+    assert t.requests[1]["url"] == "https://tf.example/v1/chat/completions"
 
 
 def test_cli_refuses_without_key_or_config(monkeypatch, capsys):
@@ -342,10 +349,9 @@ def test_cli_refuses_without_key_or_config(monkeypatch, capsys):
     monkeypatch.delenv("HG_TOKENFACTORY_BASE_URL", raising=False)
     assert cli_main(["assistant", "--backend", "nim", "--smoke"]) == 2
     assert "NVIDIA_API_KEY" in capsys.readouterr().err
-    monkeypatch.setenv("NEBIUS_API_KEY", KEY)
-    assert cli_main(["assistant", "--backend", "tokenfactory", "--skill", "pay"]) == 2
-    err = capsys.readouterr().err
-    assert "TODO" in err and KEY not in err
+    monkeypatch.delenv("NEBIUS_API_KEY", raising=False)
+    assert cli_main(["assistant", "--backend", "tokenfactory", "--smoke"]) == 2
+    assert "NEBIUS_API_KEY" in capsys.readouterr().err
 
 
 def test_long_email_keeps_its_tail_for_the_reviewer(tmp_path):

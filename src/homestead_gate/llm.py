@@ -3,11 +3,10 @@
 Stdlib only (urllib), like the rest of the gate. Two presets:
 
   nim           NVIDIA's hosted endpoint, Nemotron 3 Super. Key from $NVIDIA_API_KEY.
-  tokenfactory  Nebius Token Factory. It speaks the same OpenAI chat API, but we have no
-                account yet, so its base URL and model are placeholders. Set them with
-                $HG_TOKENFACTORY_BASE_URL and $HG_TOKENFACTORY_MODEL (or --base-url / --llm-model)
-                and the key with $NEBIUS_API_KEY. The client refuses to send anything while a
-                placeholder is still in place.
+  tokenfactory  Nebius Token Factory (same OpenAI chat API), Nemotron 3 Super. Key from
+                $NEBIUS_API_KEY. Override with $HG_TOKENFACTORY_BASE_URL / $HG_TOKENFACTORY_MODEL
+                (or --base-url / --llm-model). The client refuses to send while any base URL or
+                model is still a TODO placeholder.
 
 The key is read when a request is built and goes only into the Authorization header. It is
 never stored on the client, printed, logged, put in an exception or written to a receipt.
@@ -43,8 +42,9 @@ class Backend:
 PRESETS = {
     "nim": Backend("nim", "https://integrate.api.nvidia.com/v1",
                    "nvidia/nemotron-3-super-120b-a12b", "NVIDIA_API_KEY"),
-    # TODO(token-factory): fill in once the Nebius account exists. Both values are placeholders.
-    "tokenfactory": Backend("tokenfactory", f"{TODO}-token-factory-base-url", f"{TODO}-token-factory-model",
+    # Verified 2026-10-01: docs.tokenfactory.nebius.com base URL; model id from GET /v1/models.
+    "tokenfactory": Backend("tokenfactory", "https://api.tokenfactory.nebius.com/v1",
+                            "nvidia/nemotron-3-super-120b-a12b",
                             "NEBIUS_API_KEY", base_url_env="HG_TOKENFACTORY_BASE_URL",
                             model_env="HG_TOKENFACTORY_MODEL"),
 }
