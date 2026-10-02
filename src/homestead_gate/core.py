@@ -109,6 +109,9 @@ class Gate:
                 verdict=verdict.verdict, secs=verdict.secs)
             auto_ok, auto_why = (self.policy.may_auto(action) if not verdict.flagged
                                  and self.policy.is_allowlisted(action) else (False, ""))
+            if auto_ok and action.get("type") in ("wallet_tx", "payment") \
+                    and not self.policy.task_asks_to_spend(self.task):
+                auto_ok = False                      # the user's request never asked for money to move
             if auto_ok:
                 decided_by, decision, reason = "policy", "approve", auto_why
                 self.policy.record_auto(action)

