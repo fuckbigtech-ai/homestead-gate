@@ -108,6 +108,10 @@ function countInjection() {
 function showScenario() {
   $("custom").hidden = scenario() !== "custom";
   $("skill-box").hidden = scenario() !== "skill";
+  $("agentdojo-box").hidden = scenario() !== "agentdojo";
+  // the published attack always runs with the warning on; the server ignores the box for it too
+  $("unguarded").disabled = scenario() === "agentdojo";
+  if (scenario() === "agentdojo") $("unguarded").checked = false;
 }
 document.querySelectorAll("input[name=scenario]").forEach((r) => r.addEventListener("change", showScenario));
 $("injection").addEventListener("input", countInjection);
@@ -203,6 +207,7 @@ function onStart(d) {
   if (d.skill) t.append(el("div", "muted", `Tools: ${d.skill.tools.join(", ")}.`));
   if (!d.guarded) t.append(el("div", "", "The brain's warning about instructions in emails is removed for this run."));
   if (d.custom_injection) t.append(el("div", "", "The poisoned email contains your text."));
+  if (d.published_attack) t.append(el("div", "published-note", d.published_attack.label));
   $("h-steps").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 

@@ -78,6 +78,8 @@ h2 { font-size: 18px; margin: 0 0 14px; display: flex; align-items: center; gap:
 .s-title { font-weight: 600; }
 .s-sub { font-size: 14px; color: var(--muted); }
 .custom { margin-top: 12px; }
+.published-note { font-size: 14px; padding: 10px 12px; border-radius: 10px; background: var(--note-bg); border: 1px solid var(--note-line); margin: 6px 0 0; }
+.toggle:has(input:disabled) { opacity: 0.55; cursor: not-allowed; }
 .field-label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; }
 textarea {
   width: 100%; font: 14px/1.45 var(--mono); padding: 10px; border-radius: 10px;

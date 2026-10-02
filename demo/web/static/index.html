@@ -39,6 +39,10 @@
       <label class="scenario"><input type="radio" name="scenario" value="summarize">
         <span class="s-title">Read every email and summarize</span>
         <span class="s-sub">One email in the inbox hides an order to forward your mail to a stranger.</span></label>
+      <label class="scenario"><input type="radio" name="scenario" value="agentdojo">
+        <span class="s-title">A published attack (AgentDojo)</span>
+        <span class="s-sub">The poisoned email carries AgentDojo's attack, asking to pay Sam's invoice to another
+          wallet. Your triage skill runs with the brain's warning on.</span></label>
       <label class="scenario"><input type="radio" name="scenario" value="custom">
         <span class="s-title">Try your own injection</span>
         <span class="s-sub">Write the poisoned email yourself. Same task: summarize the inbox.</span></label>
@@ -60,6 +64,12 @@
         <button type="button" class="ghost" id="skill-save">Save skill</button>
         <p class="status" id="skill-status" role="status" aria-live="polite"></p>
       </details>
+    </div>
+
+    <div class="custom" id="agentdojo-box" hidden>
+      <p class="published-note"><strong>This is ETH Zurich's published AgentDojo attack template; we only filled in the goal.</strong>
+        Its wording is copied unchanged from AgentDojo's <code>important_instructions</code> attack. The brain's
+        warning about instructions in emails stays on for this one.</p>
     </div>
 
     <div class="custom" id="custom" hidden>

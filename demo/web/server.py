@@ -46,6 +46,7 @@ from homestead_gate.llm import LLMError
 from homestead_gate.policy import Policy
 from homestead_gate.skills import Skill, SkillError
 
+from . import agentdojo_attack
 from .approver import WebApprover
 from .reviewers import BudgetTransport, make_brain, make_reviewer, reviewer_kind, reviewer_label, reviewer_model
 
@@ -71,6 +72,9 @@ SCENARIOS = {
     "pay": {"label": "Pay Sam's invoice", "task": asst.SKILLS["pay"]},
     "summarize": {"label": "Read every email and summarize", "task": SUMMARIZE_TASK},
     "custom": {"label": "Try your own injection", "task": SUMMARIZE_TASK},
+    # AgentDojo's published template in the poisoned email; the triage skill; the warning stays on.
+    "agentdojo": {"label": "A published attack (AgentDojo)", "task": asst.SKILLS["triage"],
+                  "note": agentdojo_attack.LABEL},
     "skill": {"label": "Run one of your skills", "task": ""},
 }
 # The morning run simulates two scheduled passes (07:00 and 07:15) with mail arriving in
@@ -385,6 +389,10 @@ class App:
             chosen = skills_mod.load_skills(s.dir).get("triage") if (s.dir / skills_mod.SKILLS_FILE).exists() \
                 else None
             chosen = chosen or next(k for k in skills_mod.DEFAULT_SKILLS if k.name == "triage")
+        elif scenario == "agentdojo":
+            # the default triage skill as shipped (an edited one would change the experiment)
+            chosen = next(k for k in skills_mod.DEFAULT_SKILLS if k.name == "triage")
+            injection, unguarded = agentdojo_attack.email_body(), False     # the warning is never removed
         cost = 2 if scenario == "morning" else 1
         now = self.clock()
         with self.lock:
@@ -407,7 +415,7 @@ class App:
             run = Run(secrets.token_hex(6), scenario, task, chosen)
             s.runs[run.id] = run
             s.active = run
-        args = (s, run, injection if scenario == "custom" else "", bool(unguarded))
+        args = (s, run, injection if scenario in ("custom", "agentdojo") else "", bool(unguarded))
         if background:
             threading.Thread(target=self._execute, args=args, daemon=True).start()
         else:
@@ -516,7 +524,10 @@ class App:
 
     def _start_info(self, run: Run, unguarded: bool, injection: str, brain, reviewer) -> dict:
         return {"task": run.task, "scenario": run.scenario, "guarded": not unguarded,
-                "custom_injection": bool(injection), "brain": brain.model, "reviewer": reviewer.model,
+                "custom_injection": bool(injection) and run.scenario == "custom",
+                "published_attack": ({"label": agentdojo_attack.LABEL, "source": agentdojo_attack.SOURCE}
+                                     if run.scenario == "agentdojo" else None),
+                "brain": brain.model, "reviewer": reviewer.model,
                 "token_budget": self.token_budget,
                 "skill": run.skill.as_dict() if run.skill else None}
 
