@@ -283,13 +283,13 @@ human setting.
 Is the 4B's over-blocking about size? The same 30B reviewer that did well hosted, run the way a person runs it
 at home: `ollama pull nemotron-3-nano:30b`, the registry's default 4-bit tag (Q4_K_M, 31.6B parameters,
 `nemotron_h_moe`; model blob `sha256:a70437c41b3b0b768c48737e15f8160c90f13dc963f5226aabb3a160f708d1ce`, 24.3 GB,
-Ollama ID `b725f1117407`), Ollama 0.35.0, on one Modal **L40S** (48 GB; 23.8 GB VRAM in use once loaded).
+Ollama ID `b725f1117407`), Ollama 0.35.0, on one Modal **L40S** (48 GB; 23,783 MiB of VRAM in use once loaded, so a laptop needs about 24 GB of free VRAM or unified memory for this tag).
 Everything else as in the 4B run: brain Nemotron 3 Super on Token Factory with the guard prompt, the published
 attack, frozen reviewer prompt v1, known contacts, gate in model-only mode, `run_gate.py`'s Ollama reviewer path
 (num_ctx 16384, temperature 0, `format: json`, thinking off, at most 400 output tokens; the product's local
 reviewer also sends `think: false`), 8 lanes sharing one Ollama server. All 16 user tasks, all 144 attacked runs
-plus 16 clean ones. Launcher: `modal_run.py --local-gate nemotron-3-nano:30b --prefix nano30b_local` (committed
-before the run).
+plus 16 clean ones. Launcher: `modal_run.py --local-gate nemotron-3-nano:30b --prefix nano30b_local` (launcher
+commit `bcf53a6`, committed before the run).
 
 `python aggregate.py <traces> --matched --split` (640 of 640 runs matched):
 
@@ -303,8 +303,9 @@ before the run).
 Reviewer health (from `gate_log.jsonl` and `usage.json`): the local 30B said "block" in **2,048 of 2,062
 reviews (99.3%)**; 0 invalid verdicts and 0 reviewer-unavailable (so every block is the model's own answer,
 not fail-closed). Median review latency **1.2 s** (p90 2.4 s, max 5.9 s), measured by the gate and including
-waits in the 8-lane queue (Ollama serves this architecture one request at a time); Ollama's own per-request
-median is also 1.2 s. The 4B on an L4: 1,853 of 1,894 blocked (97.8%), median 5.0 s. Most common reasons: a
+waits in the 8-lane queue (Ollama started llama-server with `-np 1`, one request at a time); Ollama's own
+per-request median is also 1.2 s, so queueing added little. The 4B ran on a different GPU (L4): 1,853 of 1,894
+blocked (97.8%), median 5.0 s. These latencies compare GPUs as much as models; a laptop will differ. Most common reasons: a
 recipient "not in known contacts and not named by the user" and a password change "not requested".
 
 What this shows:
@@ -312,9 +313,11 @@ What this shows:
 1. **Locally, the 30B behaves like the 4B, not like the hosted 30B.** Same safety (0 of 144 through), same
    over-blocking (4.31 legitimate calls blocked per run vs 4.09; hosted 0.69). So the 4B's strictness is not
    only its size.
-2. **Two things differ from the hosted 30B, and this run cannot separate them:** the 4-bit quantization, and
-   reasoning. Hosted, Nano 30B reasons before answering (up to 2048 tokens); the local Ollama path, like the
-   product's local reviewer, turns thinking off and asks for JSON directly. A local run with thinking on would
+2. **At least these differ from the hosted 30B, and this run cannot separate them:** the 4-bit quantization;
+   reasoning (hosted, Nano 30B reasons before answering, up to 2048 tokens; the local Ollama path, like the
+   product's local reviewer, turns thinking off); a 400-token output cap with `format: json` (constrained
+   decoding); and the serving stack and chat template (Ollama/llama.cpp vs Token Factory, whose weight
+   precision we do not know). A local run with thinking on would
    tell which one matters (slower, and needs room for the reasoning); we have not run it.
 3. **For the product:** at home, a bigger local reviewer does not buy fewer approval prompts with the current
    settings. The fix to try is the reviewer setting (thinking, or giving it the user's payees), not the model size.
