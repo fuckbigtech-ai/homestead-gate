@@ -12,7 +12,9 @@ from pathlib import Path
 
 import modal
 
-ROOT = Path(__file__).resolve().parents[2]       # repo root: src/ and demo/ live here
+# Repo root (src/ and demo/ live here). Only meaningful on the deploying machine: inside the container this
+# file is /root/modal_app.py and the code is already copied to /app.
+ROOT = Path(__file__).resolve().parents[2] if modal.is_local() else Path("/app")
 PORT = 8000
 
 image = (modal.Image.debian_slim(python_version="3.12")
