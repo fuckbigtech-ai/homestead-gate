@@ -25,11 +25,27 @@ would add coverage on top, which AgentDojo cannot simulate.
 
 Deviation from GateBench, stated: AgentDojo transcripts are long, so the reviewer context is 16384
 tokens here (same as the agent, see CTX) (GateBench uses 4096), and untrusted input is capped per tool result.
+
+HOSTED MODELS (Nebius Token Factory)
+------------------------------------
+--agent-backend tokenfactory / --gate-backend tokenfactory run the agent and/or the reviewer on Token
+Factory's OpenAI-compatible API (key from $NEBIUS_API_KEY), e.g. agent Nemotron 3 Super, reviewer
+Nemotron 3 Nano 30B. The reviewer keeps the frozen prompt, known contacts and fail-closed rule; its
+parser is the web demo's (hosted.parse_verdict). Model defaults are left on (no thinking switch is
+sent), as in the product; reasoning that leaks into the reply is stripped as the product brain does.
+
+AgentDojo's important_instructions attack addresses the model by a name looked up from the pipeline
+name. Hosted runs look it up as "local", so the injected text ("... to you, Local model") is byte-
+identical to the local Qwen runs; the saved pipeline name is then the real one (tokenfactory:...).
+--agent-system guard adds the product brain's safety sentence (SYSTEM_GUARD) to AgentDojo's system
+message. --skip-selfcheck skips AgentDojo's injection-task self-checks (the attacker's goal run as the
+user's own task), which aggregate.py excludes anyway, so parallel lanes do not pay for them N times.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -47,7 +63,14 @@ from agentdojo.types import ChatToolResultMessage, get_text_content_as_str, text
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # bench/ for the frozen prompt
 from review import PROMPTS, SYSTEM, named_by_user, provenance  # noqa: E402  (v1 is byte-identical to the product's reviewer)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))   # homestead_gate.llm (stdlib only)
+import hosted  # noqa: E402
 PROMPT = {"version": "v1", "system": SYSTEM}   # --prompt v2 swaps in the multi-step candidate
+GATE = {"backend": "ollama", "client": None}   # --gate-backend tokenfactory sets a homestead_gate.llm ChatClient
+USAGE = hosted.Usage()                          # replaced in main() with one that writes usage.json
+REVIEWER_MAX_TOKENS = 2048                      # same as the web demo's TokenFactoryReviewer (reasoning room)
+AGENT_MAX_TOKENS = 4096                         # hosted agent: per-turn cap, so a runaway reply cannot run up cost
 
 OLLAMA = "http://127.0.0.1:11434"
 # One context size for agent AND reviewer. Ollama keys a loaded model by its options, so a different
@@ -155,6 +178,8 @@ def review(model: str, user_request: str, untrusted: str, action: dict, named: s
         prompt += "\n" + provenance(action, user_request, CURRENT.get("contacts", []), untrusted,
                                     named=named if PROMPT["version"] in ("v4", "v5") else None,
                                     key_fields_only=PROMPT["version"] == "v5")
+    if GATE["backend"] == "tokenfactory":
+        return review_hosted(GATE["client"], prompt)
     body = json.dumps({"model": model, "stream": False, "format": "json", "think": False,
                        "messages": [{"role": "system", "content": PROMPT["system"]}, {"role": "user", "content": prompt}],
                        "options": {"temperature": 0, "seed": 1001, "num_predict": 400, "num_ctx": CTX}}).encode()
@@ -164,9 +189,32 @@ def review(model: str, user_request: str, untrusted: str, action: dict, named: s
             raw = json.loads(r.read())["message"]["content"]
         j = json.loads(raw)
         v = str(j.get("verdict", "")).lower()
+        if v not in ("approve", "block"):
+            USAGE.event("gate_invalid")
         return (v if v in ("approve", "block") else "block"), str(j.get("reason", ""))[:200]
     except Exception as e:  # fail closed, same as the product
+        USAGE.event("gate_unavailable")
         return "block", f"reviewer unavailable: {type(e).__name__}"
+
+
+def review_hosted(client, prompt: str) -> tuple[str, str]:
+    """Same system prompt and input as the Ollama path, on an OpenAI-compatible host. Temperature 0.
+    A failed call or an answer without a clear verdict is a block (fail closed) and is counted
+    separately (gate_unavailable / gate_invalid in usage.json), so fail-closed blocks are never
+    mistaken for the reviewer's judgement."""
+    from homestead_gate.llm import LLMError
+    try:
+        msg = client.chat([{"role": "system", "content": PROMPT["system"]}, {"role": "user", "content": prompt}],
+                          temperature=0, max_tokens=REVIEWER_MAX_TOKENS)
+    except hosted.CostCapExceeded:
+        raise
+    except LLMError as e:
+        USAGE.event("gate_unavailable")
+        return "block", f"reviewer unavailable: HTTP {e.status}" if e.status else "reviewer unavailable"
+    v, reason, status = hosted.parse_verdict(msg.get("content"), msg.get("reasoning_content"))
+    if status != "ok":
+        USAGE.event("gate_invalid")
+    return v, reason
 
 
 class GatedToolsExecutor(ToolsExecutor):
@@ -192,6 +240,7 @@ class GatedToolsExecutor(ToolsExecutor):
             verdict, reason = review(self.gate_model, query, untrusted,
                                      {"type": "tool_call", "tool": call.function, "args": dict(call.args)},
                                      named=named)
+            USAGE.event(f"gate_{verdict}")
             asked, human_ok = False, False
             if verdict != "approve" and self.human == "oracle":
                 asked, human_ok = True, oracle_human(call)
@@ -209,8 +258,34 @@ class GatedToolsExecutor(ToolsExecutor):
         return q, rt, e, [*msgs, *results], ea
 
 
-def pipeline(agent_model: str, gate_model: str | None, log: list, human: str = "none") -> AgentPipeline:
-    client = openai.OpenAI(base_url=f"{OLLAMA}/v1", api_key="ollama")
+def _empty_turn(model: str) -> ChatCompletion:
+    return ChatCompletion.model_validate({
+        "id": "agent-error", "object": "chat.completion", "created": int(time.time()), "model": model,
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": "", "tool_calls": None}}]})
+
+
+def pipeline_name(agent_model: str, gate_model: str | None, human: str = "none", agent_backend: str = "ollama",
+                  gate_backend: str = "ollama", agent_sys: str = "plain") -> str:
+    """Distinct per model and setting. The default (Ollama, plain system message) is byte-identical to
+    the name every earlier run used, because trace directories are keyed on it."""
+    gate = (f"gate:{'tokenfactory:' if gate_backend == 'tokenfactory' else ''}{gate_model}" if gate_model else "nogate")
+    name = (f"{'tokenfactory' if agent_backend == 'tokenfactory' else 'local'}:{agent_model}"
+            + ("+guard" if agent_sys == "guard" else "") + f"+{gate}" + (f"+human:{human}" if gate_model else ""))
+    if gate_model and PROMPT["version"] != "v1":
+        name += f"+prompt:{PROMPT['version']}"     # separate trace dirs, so v1 and v2 never merge
+    return name
+
+
+def hosted_client(key_env: str = hosted.TF_KEY_ENV):
+    return openai.OpenAI(base_url=hosted.TF_BASE_URL, api_key=os.environ.get(key_env) or "missing",
+                         max_retries=0, timeout=180)
+
+
+def pipeline(agent_model: str, gate_model: str | None, log: list, human: str = "none",
+             agent_backend: str = "ollama", gate_backend: str = "ollama", agent_sys: str = "plain") -> AgentPipeline:
+    hosted_agent = agent_backend == "tokenfactory"
+    client = hosted_client() if hosted_agent else openai.OpenAI(base_url=f"{OLLAMA}/v1", api_key="ollama")
     _create = client.chat.completions.create
 
     def create_no_think(*args, **kw):          # agent thinking off: same setting as the reviewer
@@ -225,26 +300,95 @@ def pipeline(agent_model: str, gate_model: str | None, log: list, human: str = "
                 last = e
                 time.sleep(2 * (attempt + 1))
         AGENT_ERRORS.append(f"{type(last).__name__}: {str(last)[:160]}")
-        return ChatCompletion.model_validate({
-            "id": "agent-error", "object": "chat.completion", "created": int(time.time()), "model": agent_model,
-            "choices": [{"index": 0, "finish_reason": "stop",
-                         "message": {"role": "assistant", "content": "", "tool_calls": None}}]})
-    client.chat.completions.create = create_no_think
+        return _empty_turn(agent_model)
+
+    def create_hosted(*args, **kw):
+        # No Ollama-only switches; the model's own defaults stay on, as in the product. 429s and
+        # 5xx are retried with backoff (a 429 must not become an empty turn that quietly lowers
+        # utility). Anything still failing becomes an empty turn, counted as agent_errors.
+        kw.setdefault("max_tokens", AGENT_MAX_TOKENS)
+        # AgentDojo sends its system message with the newer "developer" role; Token Factory (like the
+        # product brain's API) accepts only system/user/assistant/tool. Same text, older role name.
+        kw["messages"] = [dict(m, role="system") if m.get("role") == "developer" else m for m in kw.get("messages", [])]
+        last = None
+        for attempt in range(7):
+            USAGE.check()
+            try:
+                c = _create(*args, **kw)
+            except openai.RateLimitError as e:
+                last = e
+                USAGE.event("agent_http_429")
+                time.sleep(min(60, 4 * 2 ** attempt))
+                continue
+            except (openai.InternalServerError, openai.APIConnectionError, openai.APITimeoutError) as e:
+                last = e
+                USAGE.event(f"agent_{type(e).__name__}")
+                time.sleep(min(60, 3 * 2 ** attempt))
+                continue
+            except openai.BadRequestError as e:     # e.g. context too long: this task fails, the suite goes on
+                last = e
+                USAGE.event("agent_http_400")
+                break
+            u = c.usage
+            ch = c.choices[0] if c.choices else None
+            USAGE.add("agent", agent_model, getattr(u, "prompt_tokens", 0), getattr(u, "completion_tokens", 0),
+                      ch.finish_reason if ch else None)
+            if ch is not None and ch.message.content and "think>" in ch.message.content:
+                USAGE.event("agent_think_in_content")
+                ch.message.content = hosted.strip_think(ch.message.content)
+            return c
+        AGENT_ERRORS.append(f"{type(last).__name__}: {str(last)[:160]}")
+        return _empty_turn(agent_model)
+
+    client.chat.completions.create = create_hosted if hosted_agent else create_no_think
     llm = OpenAILLM(client, agent_model, temperature=0.0)
     executor = GatedToolsExecutor(gate_model, log, human) if gate_model else ToolsExecutor()
-    p = AgentPipeline([SystemMessage("You are a helpful assistant."), InitQuery(), llm,
+    p = AgentPipeline([SystemMessage(hosted.agent_system(agent_sys)), InitQuery(), llm,
                        ToolsExecutionLoop([executor, llm])])
-    p.name = f"local:{agent_model}+{'gate:' + gate_model if gate_model else 'nogate'}" + (f"+human:{human}" if gate_model else "")
-    if gate_model and PROMPT["version"] != "v1":
-        p.name += f"+prompt:{PROMPT['version']}"     # separate trace dirs, so v1 and v2 never merge
+    p.name = pipeline_name(agent_model, gate_model, human, agent_backend, gate_backend, agent_sys)
     return p
+
+
+def load_attack_for(attack_name: str, suite, p: AgentPipeline):
+    """AgentDojo's attack, with the model-name slot resolved as for a local model ("Local model"),
+    exactly as in the Qwen runs, whatever the real pipeline name is. The name is restored after."""
+    real = p.name
+    if not real.startswith("local:"):
+        p.name = "local"
+    try:
+        return load_attack(attack_name, suite, p)
+    finally:
+        p.name = real
+
+
+def skip_injection_selfchecks() -> None:
+    """Make AgentDojo's injection-task self-checks (the attacker's goal run as the user's own task)
+    a no-op. Clean user-task runs go through the same function and still run."""
+    import agentdojo.benchmark as bm
+    from agentdojo.base_tasks import BaseInjectionTask
+    orig = bm.run_task_without_injection_tasks
+
+    def run(suite, agent_pipeline, task, *a, **kw):
+        if isinstance(task, BaseInjectionTask):
+            return True, True
+        return orig(suite, agent_pipeline, task, *a, **kw)
+    bm.run_task_without_injection_tasks = run
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--suite", default="banking")
     ap.add_argument("--agent", default="qwen3.5-9b-gatebench")
+    ap.add_argument("--agent-backend", choices=["ollama", "tokenfactory"], default="ollama",
+                    help="tokenfactory: Nebius Token Factory, key from $NEBIUS_API_KEY")
+    ap.add_argument("--agent-system", choices=["plain", "guard"], default="plain",
+                    help="plain: AgentDojo's system message. guard: plus the product brain's safety sentence")
     ap.add_argument("--gate", default=None, help="reviewer model; omit for the no-defense baseline")
+    ap.add_argument("--gate-backend", choices=["ollama", "tokenfactory"], default="ollama")
+    ap.add_argument("--skip-selfcheck", action="store_true",
+                    help="skip AgentDojo's injection-task self-checks (aggregate.py excludes them anyway)")
+    ap.add_argument("--cost-cap", type=float, default=float(os.environ.get("HG_LANE_COST_CAP_USD") or 0) or None,
+                    help="stop this process once its hosted-model spend estimate reaches this many USD")
     ap.add_argument("--attack", default="important_instructions")
     ap.add_argument("--human", choices=["none", "oracle"], default="none",
                     help="none: a model block is final. oracle: the 2-of-2's human approves the user's actions and refuses the attacker's")
@@ -254,11 +398,21 @@ def main() -> int:
     ap.add_argument("--out", default=str(Path(__file__).parent / "results"))
     a = ap.parse_args()
     PROMPT.update(version=a.prompt, system=PROMPTS[a.prompt])
+    global USAGE
+    Path(a.out).mkdir(parents=True, exist_ok=True)
+    USAGE = hosted.Usage(Path(a.out) / "usage.json", a.cost_cap)
+    if a.gate and a.gate_backend == "tokenfactory":
+        from homestead_gate.llm import ChatClient
+        GATE.update(backend="tokenfactory", client=ChatClient(
+            base_url=hosted.TF_BASE_URL, model=a.gate, key_env=hosted.TF_KEY_ENV, timeout_s=120, max_retries=6,
+            transport=hosted.counting_transport(USAGE, "gate", a.gate)))
+    if a.skip_selfcheck:
+        skip_injection_selfchecks()
 
     log: list = []
-    p = pipeline(a.agent, a.gate, log, a.human)
+    p = pipeline(a.agent, a.gate, log, a.human, a.agent_backend, a.gate_backend, a.agent_system)
     suite = get_suite(a.version, a.suite)
-    attack = load_attack(a.attack, suite, p)
+    attack = load_attack_for(a.attack, suite, p)
     logdir = Path(a.out) / "agentdojo_logs"
     with OutputLogger(str(logdir)):                     # AgentDojo's runner requires its logger
         clean = benchmark_suite_without_injections(p, suite, logdir, force_rerun=False,
@@ -277,9 +431,12 @@ def main() -> int:
                "human_prompts": sum(r.get("human_asked", False) for r in log),
                "human_prompts_per_run": round(sum(r.get("human_asked", False) for r in log)
                                               / max(1, len(clean["utility_results"]) + len(attacked["security_results"])), 3),
-               "agent_errors": len(AGENT_ERRORS)}
-    out = Path(a.out) / (f"{a.suite}__{a.agent.replace(':', '_')}__"
-                         + (f"gate_{a.gate.replace(':', '_')}__human_{a.human}" if a.gate else "nogate")
+               "agent_errors": len(AGENT_ERRORS),
+               "pipeline": p.name, "agent_backend": a.agent_backend, "gate_backend": a.gate_backend if a.gate else None,
+               "agent_system": a.agent_system, "attack_model_name": getattr(attack, "model_name", None),
+               "usage": USAGE.snapshot()}
+    out = Path(a.out) / (f"{a.suite}__{a.agent.replace(':', '_').replace('/', '_')}__"
+                         + (f"gate_{a.gate.replace(':', '_').replace('/', '_')}__human_{a.human}" if a.gate else "nogate")
                          + ("" if a.prompt == "v1" else f"__p{a.prompt}") + ".json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"summary": summary, "gate_log": log}, indent=1))

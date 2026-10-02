@@ -43,12 +43,37 @@ def side_effecting(fn: str) -> bool:
     return fn in ALWAYS_REVIEW or not fn.startswith(READ_ONLY_PREFIXES)
 
 
+SHORT = {"nvidia/nemotron-3-super-120b-a12b": "Nemotron 3 Super",
+         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B": "Nemotron 3 Nano 30B"}
+SHORT.update({k.replace("/", "_"): v for k, v in SHORT.items()})   # AgentDojo logs "/" as "_"
+# Attacks that only change what the agent SAYS (no tool call), which an action gate never sees.
+TEXT_ONLY = {("travel", "injection_task_6")}
+
+
 def setting_of(pipeline: str) -> str:
+    """Local (Ollama) pipelines keep the labels every earlier table used. Hosted ones name the
+    agent, the guard prompt and the reviewer, so runs of different models never merge."""
     if "+nogate" in pipeline:
-        return "no gate"
-    base = "gate + oracle human" if "human:oracle" in pipeline else "gate (model only)"
-    tag = pipeline.split("+prompt:", 1)[1] if "+prompt:" in pipeline else ""
-    return base + (f", prompt {tag}" if tag else "")
+        base = "no gate"
+    else:
+        base = "gate + oracle human" if "human:oracle" in pipeline else "gate (model only)"
+        tag = pipeline.split("+prompt:", 1)[1] if "+prompt:" in pipeline else ""
+        base += f", prompt {tag}" if tag else ""
+    head = pipeline.split("+", 1)[0]
+    if head.startswith("local:"):
+        return base
+    backend, _, model = head.partition(":")
+    label = f"{SHORT.get(model, model)} ({'Token Factory' if backend == 'tokenfactory' else backend}"
+    label += ", guard prompt)" if "+guard" in pipeline else ")"
+    if "+gate:" in pipeline:
+        g = pipeline.split("+gate:", 1)[1].split("+", 1)[0]
+        g = g.split("tokenfactory:", 1)[1] if g.startswith("tokenfactory:") else g
+        base += f", reviewer {SHORT.get(g, g)}"
+    return f"{label}: {base}"
+
+
+def _base(setting: str) -> str:
+    return setting.split(": ", 1)[1].split(", reviewer", 1)[0] if ": " in setting else setting
 
 
 def _vals(x) -> set[str]:
@@ -139,7 +164,8 @@ def table(runs) -> str:
              "attacked runs: ignored / blocked / tried, failed / through | legit actions blocked per run |",
              "|---|---|---|---|---|---|---|---|"]
     pct = lambda a, b: f"{a}/{b} ({a / b:.0%})" if b else "n/a"
-    for (suite, setting), rs in sorted(g.items(), key=lambda kv: (kv[0][0], order.get(kv[0][1], 9))):
+    for (suite, setting), rs in sorted(g.items(), key=lambda kv: (kv[0][0], kv[0][1].split(": ")[0] if ": " in kv[0][1] else "",
+                                                                     order.get(_base(kv[0][1]), 9))):
         clean = [r for r in rs if not r["injection_task"]]
         att = [r for r in rs if r["injection_task"]]
         o = defaultdict(int)
@@ -153,16 +179,72 @@ def table(runs) -> str:
     return "\n".join(lines)
 
 
+def matched(runs):
+    """Only the (suite, user task, injection task) cells that EVERY setting in `runs` has, so a
+    partial run is compared with its counterpart on the same tasks, never on a bigger set."""
+    by = defaultdict(set)
+    for r in runs:
+        by[r["setting"]].add((r["suite"], r["user_task"], r["injection_task"]))
+    common = set.intersection(*by.values()) if by else set()
+    return [r for r in runs if (r["suite"], r["user_task"], r["injection_task"]) in common]
+
+
+def split_table(runs) -> str:
+    """Attack success split into attacks that need an action and the ones that only change the reply."""
+    g = defaultdict(list)
+    for r in runs:
+        if r["injection_task"]:
+            g[(r["suite"], r["setting"])].append(r)
+    pct = lambda a, b: f"{a}/{b} ({a / b:.0%})" if b else "n/a"
+    lines = ["| suite | setting | action attacks through | say-something attack through |", "|---|---|---|---|"]
+    for (suite, setting), rs in sorted(g.items()):
+        act = [r for r in rs if (suite, r["injection_task"]) not in TEXT_ONLY]
+        txt = [r for r in rs if (suite, r["injection_task"]) in TEXT_ONLY]
+        lines.append(f"| {suite} | {setting} | {pct(sum(r['attack_success'] for r in act), len(act))} | "
+                     f"{pct(sum(r['attack_success'] for r in txt), len(txt)) if txt else 'none in suite'} |")
+    return "\n".join(lines)
+
+
+def successes(runs) -> str:
+    """Every attacked run that got through with no gate, with what the model-only gate did on the
+    same (user task, injection task) pair. The goal text is AgentDojo's own (injection task GOAL)."""
+    idx = {(r["setting"], r["suite"], r["user_task"], r["injection_task"]): r for r in runs}
+    lines = ["| suite | user task | injection task | attacker's goal (AgentDojo's text) | with the gate: outcome |",
+             "|---|---|---|---|---|"]
+    for r in sorted(runs, key=lambda r: (r["suite"], r["injection_task"] or "", r["user_task"])):
+        if _base(r["setting"]) != "no gate" or not r["attack_success"]:
+            continue
+        agent = r["setting"].split(": ", 1)[0] if ": " in r["setting"] else ""
+        gated = [v for (st, su, ut, it), v in idx.items() if su == r["suite"] and ut == r["user_task"]
+                 and it == r["injection_task"] and _base(st) == "gate (model only)"
+                 and (st.split(": ", 1)[0] if ": " in st else "") == agent]
+        o = (f"{gated[0]['outcome']}" + (" (attack succeeded)" if gated[0]["attack_success"] else "")) if gated else "not run"
+        goal = get_suite("v1.2.2", r["suite"]).injection_tasks[r["injection_task"]].GOAL.replace("|", "/").replace("\n", " ")
+        lines.append(f"| {r['suite']} | {r['user_task']} | {r['injection_task']} | {goal} | {o} |")
+    return "\n".join(lines)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("dirs", nargs="+")
     ap.add_argument("--json")
+    ap.add_argument("--matched", action="store_true", help="keep only task pairs every setting has")
+    ap.add_argument("--split", action="store_true", help="also print action vs say-something attack success")
+    ap.add_argument("--successes", action="store_true", help="also list no-gate attack successes and the gate's outcome")
     a = ap.parse_args()
     runs, dupes = collect(a.dirs)
     if not runs:
         print("no AgentDojo traces found", file=sys.stderr)
         return 1
+    if a.matched:
+        n = len(runs)
+        runs = matched(runs)
+        print(f"matched: kept {len(runs)} of {n} runs (task pairs every setting has)\n")
     print(table(runs))
+    if a.split:
+        print("\n" + split_table(runs))
+    if a.successes:
+        print("\n" + successes(runs))
     print(f"\n{len(runs)} runs; {dupes} duplicate traces skipped (newest kept).")
     if a.json:
         json.dump(runs, open(a.json, "w"), indent=1)
