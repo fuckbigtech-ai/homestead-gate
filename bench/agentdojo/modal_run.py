@@ -144,7 +144,8 @@ def run_nemotron(suite: str, lane: int, user_tasks: list[str], settings: list[st
 # 4-bit default tag), served by Ollama on one GPU. Same run_gate.py path as the Nano 4B run: gate
 # backend ollama, num_ctx 16384 (run_gate.CTX), frozen prompt v1, model only, LOCAL_LANES lanes sharing
 # the one Ollama server. Ollama serves nemotron_h one request at a time, so reviews queue.
-#   modal run --detach bench/agentdojo/modal_run.py --local-gate nemotron-3-nano:30b --prefix nano30b_local
+#   modal run --detach bench/agentdojo/modal_run.py --suite banking --local-gate nemotron-3-nano:30b \
+#       --prefix nano30b_local --cost-cap 0.9 --total-cap 3.6
 local_image = (modal.Image.debian_slim(python_version="3.12")
                .apt_install("curl", "zstd", "ca-certificates")
                .run_commands("curl -fsSL https://ollama.com/install.sh | sh")
@@ -160,9 +161,12 @@ LOCAL_LANES = 8
 
 @app.function(image=local_image, gpu="L40S", timeout=2 * 3600, volumes={"/results": vol},
               secrets=[modal.Secret.from_name("nebius-token-factory")])
-def run_local_gate(suite: str, gate_model: str, user_tasks: list[str], cost_cap: float, prefix: str) -> dict:
+def run_local_gate(suite: str, gate_model: str, user_tasks: list[str], cost_cap: float, prefix: str,
+                   total_cap: float = 3.6) -> dict:
     """All lanes in one container around one Ollama server. Each lane stops itself at `cost_cap` USD of
-    brain spend (the reviewer is local and free). The 2 h timeout is the hard GPU-spend stop."""
+    brain spend (a loose backstop: the lanes holding banking tasks 12/13 cost the most), and every lane
+    is terminated once the summed brain spend reaches `total_cap`. The reviewer is local and free. The
+    2 h timeout is the hard GPU-spend stop."""
     import os, subprocess, time, urllib.request
     root = f"/results/{prefix}/{suite}"
     Path(root).mkdir(parents=True, exist_ok=True)
@@ -211,10 +215,22 @@ def run_local_gate(suite: str, gate_model: str, user_tasks: list[str], cost_cap:
         vol.commit()
         runs = sum(1 for _ in Path(root).rglob("agentdojo_logs/**/*.json"))
         rows = [json.loads(l) for f in Path(root).rglob("gate_log.jsonl") for l in f.read_text().splitlines() if l]
-        usd = sum(json.loads(u.read_text()).get("usd_estimate", 0) for u in Path(root).rglob("usage.json"))
+        usd, events = 0.0, {}
+        for u in Path(root).rglob("usage.json"):
+            try:
+                j = json.loads(u.read_text())
+            except Exception:
+                continue
+            usd += j.get("usd_estimate", 0)
+            for k, v in j.get("events", {}).items():
+                events[k] = events.get(k, 0) + v
         blk = sum(r["verdict"] == "block" for r in rows)
         print(f"{suite} {gate_model}: {runs} run logs, {len(rows)} reviews ({blk} block), ${usd:.3f} brain, "
-              f"{round((time.time() - t) / 60)} min; last: {rows[-1] if rows else None}", flush=True)
+              f"{round((time.time() - t) / 60)} min; events {events}; last: {rows[-1] if rows else None}", flush=True)
+        if usd >= total_cap:
+            print(f"TOTAL CAP ${total_cap} reached: terminating all lanes", flush=True)
+            for p in procs:
+                p.terminate()
     vol.commit()
     return {"rc": [p.returncode for p in procs], "minutes": round((time.time() - t) / 60, 1)}
 
@@ -258,11 +274,12 @@ def gatebench(prompts: list[str], repeats: int = 3, split: str = "test") -> dict
 @app.local_entrypoint()
 def main(suite: str = "workspace", chunks: int = 4, smoke: bool = False, replay_prompts: str = "",
          gatebench_prompts: str = "", settings: str = "", split: str = "test", nemotron: bool = False,
-         lanes: int = 4, cost_cap: float = 1.2, tasks: str = "", prefix: str = "nemotron", local_gate: str = ""):
+         lanes: int = 4, cost_cap: float = 1.2, tasks: str = "", prefix: str = "nemotron", local_gate: str = "",
+         total_cap: float = 3.6):
     if local_gate:
         n = {"workspace": 40, "travel": 20, "banking": 16, "slack": 21}[suite]
         ids = tasks.split(",") if tasks else [f"user_task_{i}" for i in range(n)]
-        print(run_local_gate.remote(suite, local_gate, ids, cost_cap, prefix), flush=True)
+        print(run_local_gate.remote(suite, local_gate, ids, cost_cap, prefix, total_cap), flush=True)
         return
     if nemotron:
         # modal run bench/agentdojo/modal_run.py --nemotron --suite banking,travel --lanes 4
