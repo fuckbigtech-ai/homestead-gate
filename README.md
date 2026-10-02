@@ -1,21 +1,34 @@
-# homestead-gate
+# homestead
 
-A 2-of-2 approval gate for AI agents: nothing an agent sends (email, posts, payments, wallet
-transactions) leaves your machine until a local model has reviewed it **and** you have said yes.
-Part of [fuckbigtech.ai](https://fuckbigtech.ai), alongside
-[homestead-memory](https://github.com/fuckbigtech-ai/homestead-memory).
+**A personal AI assistant that can't be talked into spending your money.** It reads your email, pays your bills
+and answers for you. Anyone who can email you can try to give it orders, so nothing it sends (an email, a
+payment, a wallet transaction) leaves until a second model on your machine has reviewed it **and** you have said
+yes. The cloud does the thinking. Your machine has the veto. The cloud can't vote.
 
-This repo starts with the evidence, not the product: **[GateBench](bench/)**, an open benchmark
-that asks whether a small local model can catch a hijacked agent before it acts.
+- **Try it:** [live demo](https://frumza--homestead-web-demo-web.modal.run) (no sign-up; write your own poisoned
+  email and watch the gate stop it)
+- **Two NVIDIA open models:** Nemotron 3 Super on **Nebius Token Factory** plans and calls tools; Nemotron 3 Nano
+  reviews every outbound action (4B on your machine in the product; 30B on Token Factory in the hosted demo)
+- **Measured, not claimed:** on [AgentDojo](bench/agentdojo/RESULTS.md) (ETH Zurich's benchmark for hijacked
+  agents), 28 to 36% of the attacks that try to make the agent act succeed without a gate; with the gate, none
+  did. The cost is real too: it blocks some legitimate work, and those numbers are published next to the wins.
+- **Receipts you can check:** every request, verdict and decision is written to a hash chain before anything
+  runs; edit one record and `homestead-gate watch` shows the line where the chain breaks.
 
-**v0.1 headline:** Qwen 3.5 9B (6.6GB, running on an 18GB laptop) blocked 30 of 30 attacks and
-0 of 30 legitimate actions across three repeats. Full numbers in
-[bench/RESULTS.md](bench/RESULTS.md), and read the limits in [bench/README.md](bench/README.md)
-before quoting them.
+```bash
+git clone https://github.com/fuckbigtech-ai/homestead-gate && cd homestead-gate
+pip install -e .                                   # not on PyPI yet
+export NEBIUS_API_KEY=...                          # Nebius Token Factory
+ollama pull nemotron-3-nano:4b                     # the local reviewer
+homestead-gate assistant --skill triage            # go through the inbox; anything outbound waits for the gate
+```
 
-Found an attack that gets through? Open a pull request with a new case. That's the point.
+Built for the Nebius x NVIDIA Global AI Hackathon (Personal AI track). Part of
+[fuckbigtech.ai](https://fuckbigtech.ai), alongside [homestead-memory](https://github.com/fuckbigtech-ai/homestead-memory)
+(the verifiable memory the assistant uses). The open benchmark behind it is **[GateBench](bench/)**: found an
+attack that gets through? Open a pull request with a new case.
 
-## The gate (in development, not released)
+## The gate
 
 ```bash
 pip install -e .                         # PyPI release comes later
@@ -272,8 +285,8 @@ button on the network. The web approver lives only in `demo/web`, and a test fai
 `src/homestead_gate` can import it. GateBench numbers were measured on the local reviewers, not on
 the hosted Nano 30B. Each browser session gets its own data and receipts, deleted after an hour.
 Runs are rate limited (5 per page and 20 in total per hour by default) with a token budget per run.
-Email is never sent and payments are unsigned. `demo/web/modal_app.py` would host it on Modal; it
-has not been deployed.
+Email is never sent and payments are unsigned. It is hosted on Modal with `demo/web/modal_app.py`
+(live at the link at the top).
 
 ### Threat model
 
