@@ -288,6 +288,83 @@ def replay_items(items: list, prompt: str) -> dict:
             "setup_min": round((t1 - t0) / 60, 2), "total_min": round((time.time() - t0) / 60, 2)}
 
 
+# Does thinking fix the local reviewers? Same items, same prompt v1, each item under each of replay.py's
+# --think-modes (off = run_gate's exact request; on = think true, no format, 2048 tokens), one request at a
+# time (a laptop serves one), model loaded before timing. The model blob is checked against the one the
+# banking run used; a mismatch stops before any review. Rows are written to the volume as they come
+# (agentdojo-results/replay_think/<model>.json), so a timeout keeps what finished.
+#   modal run bench/agentdojo/modal_run.py --replay-items-file items.json --replay-think 4b,30b \
+#       --think-modes off,on --replay-out DIR            (--probe 2: 2 items under on,on-json,template)
+THINK_MODELS = {"4b": (NANO4B_GGUF, NANO4B, "be5d9a656a51"),
+                "30b": ("nemotron-3-nano:30b", "nemotron-3-nano:30b", "a70437c41b3b")}
+THINK_TIMEOUT_MIN = {"4b": 70, "30b": 45}       # the hard GPU-spend stop: L4 ~$0.93, L40S ~$1.46 at list price
+
+
+def _replay_think(items: list, which: str, modes: list[str], probe: int, gpu: str) -> dict:
+    import os, subprocess, time, urllib.request
+    t0 = time.time()
+    pull, name, blob = THINK_MODELS[which]
+    sh = lambda c: subprocess.run(c, shell=True, capture_output=True, text=True).stdout
+    env = dict(os.environ, OLLAMA_CONTEXT_LENGTH="16384", OLLAMA_KEEP_ALIVE="120m")
+    env.pop("OLLAMA_NUM_PARALLEL", None)
+    subprocess.Popen("ollama serve > /tmp/ollama.log 2>&1", shell=True, env=env)
+    for _ in range(60):
+        try:
+            urllib.request.urlopen("http://127.0.0.1:11434/api/version", timeout=2); break
+        except Exception:
+            time.sleep(2)
+    for _ in range(4):
+        if subprocess.run(f"ollama pull {pull}", shell=True).returncode == 0:
+            break
+        time.sleep(60)
+    else:
+        raise SystemExit(f"could not pull {pull}")
+    if name != pull:
+        subprocess.run(f"ollama cp {pull} {name}", shell=True, check=True)
+    blobs = sorted(p.name for p in Path("/root/.ollama/models/blobs").iterdir())
+    meta = {"model": name, "gpu_requested": gpu, "ollama": sh("ollama --version").strip(),
+            "gpu": sh("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader").strip(), "blobs": blobs,
+            "show": sh(f"ollama show {name}"), "modelfile": sh(f"ollama show --modelfile {name}")[-3000:]}
+    if not any(b.startswith(f"sha256-{blob}") for b in blobs):
+        return {"which": which, "meta": meta, "rows": None, "error": f"model blob {blob} not found: {blobs}"}
+    subprocess.run(["curl", "-s", "http://127.0.0.1:11434/api/chat", "-d", json.dumps(
+        {"model": name, "stream": False, "think": False, "messages": [{"role": "user", "content": "hi"}],
+         "options": {"num_ctx": 16384, "num_predict": 8}})], capture_output=True)
+    meta["vram_after_load"] = sh("nvidia-smi --query-gpu=memory.used --format=csv,noheader").strip()
+    meta["ps"] = sh("ollama ps")
+    print(json.dumps({k: v for k, v in meta.items() if k not in ("modelfile",)}, indent=1), flush=True)
+    Path("/tmp/items.json").write_text(json.dumps(items))
+    dest = f"/results/replay_think/{'probe_' if probe else ''}{which}.json"
+    Path(dest).parent.mkdir(parents=True, exist_ok=True)
+    left = THINK_TIMEOUT_MIN[which] - (time.time() - t0) / 60 - 6      # leave time to return the rows
+    cmd = ["python", "/root/bench/agentdojo/replay.py", "--items", "/tmp/items.json", "--prompt", "v1", "--model", name,
+           "--think-modes", ",".join(modes), "--deadline-min", f"{max(left, 1):.1f}", "--out", dest]
+    if probe:
+        cmd += ["--limit", str(probe)]
+    t1 = time.time()
+    p = subprocess.Popen(cmd, stdout=open("/tmp/replay.log", "w"), stderr=subprocess.STDOUT)
+    while p.poll() is None:
+        time.sleep(30)
+        vol.commit()
+    vol.commit()
+    log = Path("/tmp/replay.log").read_text()
+    print(log[-2500:], flush=True)
+    rows = json.loads(Path(dest).read_text()) if Path(dest).exists() else None
+    return {"which": which, "meta": meta, "rows": rows, "error": None if p.returncode == 0 else log[-3000:],
+            "log_tail": log[-1500:], "ollama_log_tail": Path("/tmp/ollama.log").read_text()[-3000:],
+            "setup_min": round((t1 - t0) / 60, 2), "total_min": round((time.time() - t0) / 60, 2)}
+
+
+@app.function(gpu="L4", timeout=THINK_TIMEOUT_MIN["4b"] * 60, image=items_image, volumes={"/results": vol})
+def replay_think_l4(items: list, which: str, modes: list[str], probe: int = 0) -> dict:
+    return _replay_think(items, which, modes, probe, "L4")
+
+
+@app.function(gpu="L40S", timeout=THINK_TIMEOUT_MIN["30b"] * 60, image=items_image, volumes={"/results": vol})
+def replay_think_l40s(items: list, which: str, modes: list[str], probe: int = 0) -> dict:
+    return _replay_think(items, which, modes, probe, "L40S")
+
+
 @app.function(gpu="L4", timeout=3 * 3600)
 def gatebench(prompts: list[str], repeats: int = 3, split: str = "test") -> dict:
     """GateBench frozen test split (v0.1 harness, 60 cases) and the multi-step family, per prompt."""
@@ -312,7 +389,22 @@ def gatebench(prompts: list[str], repeats: int = 3, split: str = "test") -> dict
 def main(suite: str = "workspace", chunks: int = 4, smoke: bool = False, replay_prompts: str = "",
          gatebench_prompts: str = "", settings: str = "", split: str = "test", nemotron: bool = False,
          lanes: int = 4, cost_cap: float = 1.2, tasks: str = "", prefix: str = "nemotron", replay_items_file: str = "",
-         replay_out: str = "", local_gate: str = "", total_cap: float = 3.6):
+         replay_out: str = "", local_gate: str = "", total_cap: float = 3.6, replay_think: str = "",
+         think_modes: str = "off,on", probe: int = 0):
+    if replay_items_file and replay_think:
+        its = json.loads(Path(replay_items_file).read_text())
+        out = Path(replay_out or RUNS)
+        out.mkdir(parents=True, exist_ok=True)
+        modes = ("on,on-json,template" if probe else think_modes).split(",")
+        fns = {"4b": replay_think_l4, "30b": replay_think_l40s}
+        calls = [(w, fns[w].spawn(its, w, modes, probe)) for w in replay_think.split(",")]
+        for w, c in calls:
+            res = c.get()
+            (out / f"replay_think_{'probe_' if probe else ''}{w}.json").write_text(json.dumps(res, indent=1))
+            print(w, res["meta"].get("gpu"), res["meta"].get("ollama"), "setup", res.get("setup_min"), "min, total",
+                  res.get("total_min"), "min", "ERROR " + res["error"][-800:] if res["error"] else "", flush=True)
+            print(res.get("log_tail", ""), flush=True)
+        return
     if replay_items_file:
         # Nano 4B re-review of items from `replay.py ... --dump-items F`, one L4 container per prompt:
         # modal run bench/agentdojo/modal_run.py --replay-items-file F --replay-prompts v1,v2,v5 --replay-out DIR
