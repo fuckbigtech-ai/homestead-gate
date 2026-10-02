@@ -404,3 +404,17 @@ def test_cli_end_to_end_hijack_is_denied(tmp_path, monkeypatch, capsys):
     assert rc == 0 and f"send_email to {ATTACKER}: denied by human:terminal" in out
     assert receipts(tmp_path / "d")[-1]["action"] == "gate.denied" and KEY not in out
     assert "DRY-RUN" in out
+
+
+def test_cli_assistant_runs_end_to_end(tmp_path, monkeypatch):
+    """The whole `homestead-gate assistant` path, brain scripted, so a broken variable in the CLI
+    (2026-10-01: a NameError the unit tests missed, found while recording the demo) fails here."""
+    import homestead_gate.cli as cli
+    from homestead_gate import llm as llm_mod
+    original = llm_mod.ChatClient.from_preset
+    monkeypatch.setattr(llm_mod.ChatClient, "from_preset", classmethod(
+        lambda cls, name, **kw: original(name, api_key=KEY, transport=ScriptedLLM(done()))))
+    monkeypatch.setattr(cli, "_fits", lambda *a, **k: True)
+    monkeypatch.setenv("NEBIUS_API_KEY", KEY)
+    assert cli_main(["assistant", "--skill", "pay", "--data", str(tmp_path / "d")]) == 0
+    assert 'model = "nemotron-3-nano:4b"' in (tmp_path / "d" / "policy.toml").read_text()

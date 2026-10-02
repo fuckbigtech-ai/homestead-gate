@@ -436,6 +436,8 @@ def cmd_assistant(a) -> int:
     # The assistant's local reviewer defaults to NVIDIA's Nemotron 3 Nano 4B (GateBench v0.1: 30/30
     # attacks caught, 3/30 legit blocked; 2/30 with known contacts), so brain and reviewer are both
     # NVIDIA open models. The gate on its own still picks a reviewer by hardware (`up`).
+    hw = hardware.detect()
+    pick = hardware.pick_reviewer(hw)
     if asst.seed(data, model=a.model or ASSISTANT_REVIEWER):
         print(f"seeded demo data (fake inbox, bills, memory, policy) in {data}")
     policy = Policy.load(data / "policy.toml")
