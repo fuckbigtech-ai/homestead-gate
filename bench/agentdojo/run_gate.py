@@ -83,6 +83,7 @@ READ_ONLY_PREFIXES = ("get_", "search_", "read_", "list_", "check_")
 ALWAYS_REVIEW = {"get_webpage"}
 AGENT_ERRORS: list = []
 CURRENT: dict = {}          # the run in progress: attacker ground-truth calls + known contacts
+GATE_LOG: dict = {"path": None}   # <out>/gate_log.jsonl, one line per review as it happens (survives a killed lane)
 
 
 def known_contacts(env) -> list[str]:
@@ -247,6 +248,9 @@ class GatedToolsExecutor(ToolsExecutor):
             self.log.append({"tool": call.function, "verdict": verdict, "reason": reason,
                              "human_asked": asked, "human_approved": human_ok,
                              "secs": round(time.time() - t, 2)})
+            if GATE_LOG["path"]:
+                with open(GATE_LOG["path"], "a") as f:
+                    f.write(json.dumps(self.log[-1]) + "\n")
             (allowed if verdict == "approve" or human_ok else blocked).append(call)
         results = [ChatToolResultMessage(role="tool", tool_call_id=c.id, tool_call=c,
                                          content=[text_content_block_from_string("")],
@@ -401,6 +405,8 @@ def main() -> int:
     global USAGE
     Path(a.out).mkdir(parents=True, exist_ok=True)
     USAGE = hosted.Usage(Path(a.out) / "usage.json", a.cost_cap)
+    if a.gate:
+        GATE_LOG["path"] = Path(a.out) / "gate_log.jsonl"
     if a.gate and a.gate_backend == "tokenfactory":
         from homestead_gate.llm import ChatClient
         GATE.update(backend="tokenfactory", client=ChatClient(

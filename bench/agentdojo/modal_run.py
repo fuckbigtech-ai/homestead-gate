@@ -139,6 +139,86 @@ def run_nemotron(suite: str, lane: int, user_tasks: list[str], settings: list[st
                                                                  "minutes": round((time.time() - t) / 60, 1)}
 
 
+# Local reviewer: brain Nemotron 3 Super on Token Factory (guard prompt), reviewer a Nemotron Nano tag
+# pulled from the Ollama registry exactly as a laptop would (`ollama pull nemotron-3-nano:30b`, the
+# 4-bit default tag), served by Ollama on one GPU. Same run_gate.py path as the Nano 4B run: gate
+# backend ollama, num_ctx 16384 (run_gate.CTX), frozen prompt v1, model only, LOCAL_LANES lanes sharing
+# the one Ollama server. Ollama serves nemotron_h one request at a time, so reviews queue.
+#   modal run --detach bench/agentdojo/modal_run.py --local-gate nemotron-3-nano:30b --prefix nano30b_local
+local_image = (modal.Image.debian_slim(python_version="3.12")
+               .apt_install("curl", "zstd", "ca-certificates")
+               .run_commands("curl -fsSL https://ollama.com/install.sh | sh")
+               .pip_install("agentdojo==0.1.35", "openai")
+               .add_local_file(HERE.parent / "review.py", "/root/bench/review.py")
+               .add_local_file(HERE / "run_gate.py", "/root/bench/agentdojo/run_gate.py")
+               .add_local_file(HERE / "hosted.py", "/root/bench/agentdojo/hosted.py")
+               .add_local_file(SRC / "__init__.py", "/root/src/homestead_gate/__init__.py")
+               .add_local_file(SRC / "llm.py", "/root/src/homestead_gate/llm.py")
+               .add_local_file(SRC / "assistant.py", "/root/src/homestead_gate/assistant.py"))
+LOCAL_LANES = 8
+
+
+@app.function(image=local_image, gpu="L40S", timeout=2 * 3600, volumes={"/results": vol},
+              secrets=[modal.Secret.from_name("nebius-token-factory")])
+def run_local_gate(suite: str, gate_model: str, user_tasks: list[str], cost_cap: float, prefix: str) -> dict:
+    """All lanes in one container around one Ollama server. Each lane stops itself at `cost_cap` USD of
+    brain spend (the reviewer is local and free). The 2 h timeout is the hard GPU-spend stop."""
+    import os, subprocess, time, urllib.request
+    root = f"/results/{prefix}/{suite}"
+    Path(root).mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, OLLAMA_CONTEXT_LENGTH="16384", OLLAMA_KEEP_ALIVE="120m")
+    subprocess.Popen(f"ollama serve > {root}/ollama.log 2>&1", shell=True, env=env)
+    for _ in range(60):
+        try:
+            urllib.request.urlopen("http://127.0.0.1:11434/api/version", timeout=2); break
+        except Exception:
+            time.sleep(2)
+    for _ in range(6):
+        if subprocess.run(f"ollama pull {gate_model}", shell=True).returncode == 0:
+            break
+        time.sleep(60)
+    else:
+        raise SystemExit(f"could not pull {gate_model}")
+    sh = lambda c: subprocess.run(c, shell=True, capture_output=True, text=True).stdout
+    info = {"ollama": sh("ollama --version").strip(), "gpu": sh("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader").strip(),
+            "gate_model": gate_model, "list": sh("ollama list"), "show": sh(f"ollama show {gate_model}"),
+            "modelfile_from": [l for l in sh(f"ollama show --modelfile {gate_model}").splitlines() if l.startswith("FROM")],
+            "manifest": sh(f"cat /root/.ollama/models/manifests/registry.ollama.ai/library/{gate_model.replace(':', '/')}"),
+            "lanes": LOCAL_LANES, "user_tasks": user_tasks, "cost_cap_per_lane": cost_cap}
+    # warm the model once so lane 0's first review is not the load
+    subprocess.run(["curl", "-s", "http://127.0.0.1:11434/api/chat", "-d", json.dumps(
+        {"model": gate_model, "stream": False, "think": False, "messages": [{"role": "user", "content": "hi"}],
+         "options": {"num_ctx": 16384, "num_predict": 8}})], capture_output=True)
+    info["vram_after_load"] = sh("nvidia-smi --query-gpu=memory.used --format=csv,noheader").strip()
+    info["ps"] = sh("ollama ps")
+    Path(f"{root}/env.json").write_text(json.dumps(info, indent=1))
+    print(json.dumps(info, indent=1), flush=True)
+    vol.commit()
+    t, procs = time.time(), []
+    for lane in range(LOCAL_LANES):
+        mine = user_tasks[lane::LOCAL_LANES]
+        if not mine:
+            continue
+        dest = f"{root}/lane{lane:02d}/gate"
+        Path(dest).mkdir(parents=True, exist_ok=True)
+        procs.append(subprocess.Popen(
+            ["python", "/root/bench/agentdojo/run_gate.py", "--suite", suite, "--out", dest, "--user-tasks", *mine,
+             *NEMO_COMMON, "--gate", gate_model, "--gate-backend", "ollama", "--human", "none"],
+            stdout=open(f"{dest}/stdout.txt", "w"), stderr=subprocess.STDOUT,
+            env=dict(os.environ, HG_LANE_COST_CAP_USD=str(cost_cap))))
+    while any(p.poll() is None for p in procs):
+        time.sleep(60)
+        vol.commit()
+        runs = sum(1 for _ in Path(root).rglob("agentdojo_logs/**/*.json"))
+        rows = [json.loads(l) for f in Path(root).rglob("gate_log.jsonl") for l in f.read_text().splitlines() if l]
+        usd = sum(json.loads(u.read_text()).get("usd_estimate", 0) for u in Path(root).rglob("usage.json"))
+        blk = sum(r["verdict"] == "block" for r in rows)
+        print(f"{suite} {gate_model}: {runs} run logs, {len(rows)} reviews ({blk} block), ${usd:.3f} brain, "
+              f"{round((time.time() - t) / 60)} min; last: {rows[-1] if rows else None}", flush=True)
+    vol.commit()
+    return {"rc": [p.returncode for p in procs], "minutes": round((time.time() - t) / 60, 1)}
+
+
 @app.function(gpu="L4", timeout=3 * 3600, image=replay_image)
 def replay(prompts: list[str]) -> dict:
     """Re-review the recorded banking + Slack gate decisions (replay.py) under each prompt, on a GPU."""
@@ -178,7 +258,12 @@ def gatebench(prompts: list[str], repeats: int = 3, split: str = "test") -> dict
 @app.local_entrypoint()
 def main(suite: str = "workspace", chunks: int = 4, smoke: bool = False, replay_prompts: str = "",
          gatebench_prompts: str = "", settings: str = "", split: str = "test", nemotron: bool = False,
-         lanes: int = 4, cost_cap: float = 1.2, tasks: str = "", prefix: str = "nemotron"):
+         lanes: int = 4, cost_cap: float = 1.2, tasks: str = "", prefix: str = "nemotron", local_gate: str = ""):
+    if local_gate:
+        n = {"workspace": 40, "travel": 20, "banking": 16, "slack": 21}[suite]
+        ids = tasks.split(",") if tasks else [f"user_task_{i}" for i in range(n)]
+        print(run_local_gate.remote(suite, local_gate, ids, cost_cap, prefix), flush=True)
+        return
     if nemotron:
         # modal run bench/agentdojo/modal_run.py --nemotron --suite banking,travel --lanes 4
         # --tasks user_task_0 (smoke) restricts the user tasks. Results: agentdojo-results/<prefix>/<suite>/
