@@ -59,9 +59,10 @@ def setting_of(pipeline: str) -> str:
         base = "gate + oracle human" if "human:oracle" in pipeline else "gate (model only)"
         tag = pipeline.split("+prompt:", 1)[1] if "+prompt:" in pipeline else ""
         base += f", prompt {tag}" if tag else ""
+    think = ", thinking on" if "think" in pipeline.split("+")[1:] else ""   # run_gate --gate-think
     head = pipeline.split("+", 1)[0]
     if head.startswith("local:"):
-        return base
+        return base + think
     backend, _, model = head.partition(":")
     label = f"{SHORT.get(model, model)} ({'Token Factory' if backend == 'tokenfactory' else backend}"
     label += ", guard prompt)" if "+guard" in pipeline else ")"
@@ -69,11 +70,12 @@ def setting_of(pipeline: str) -> str:
         g = pipeline.split("+gate:", 1)[1].split("+", 1)[0]
         g = g.split("tokenfactory:", 1)[1] if g.startswith("tokenfactory:") else g
         base += f", reviewer {SHORT.get(g, g)}"
-    return f"{label}: {base}"
+    return f"{label}: {base}{think}"
 
 
 def _base(setting: str) -> str:
-    return setting.split(": ", 1)[1].split(", reviewer", 1)[0] if ": " in setting else setting
+    s = setting.split(": ", 1)[1].split(", reviewer", 1)[0] if ": " in setting else setting
+    return s.removesuffix(", thinking on")
 
 
 def _vals(x) -> set[str]:

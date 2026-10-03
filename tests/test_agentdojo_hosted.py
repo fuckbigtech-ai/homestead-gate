@@ -215,3 +215,73 @@ def test_aggregate_labels_keep_old_rows_and_separate_models():
     assert ng == "Nemotron 3 Super (Token Factory, guard prompt): no gate"
     assert g == "Nemotron 3 Super (Token Factory, guard prompt): gate (model only), reviewer Nemotron 3 Nano 30B"
     assert aggregate._base(ng) == "no gate" and aggregate._base(g) == "gate (model only)"
+
+
+def test_aggregate_keeps_thinking_runs_apart():
+    pytest.importorskip("agentdojo.task_suite")
+    import aggregate
+    head = "tokenfactory:nvidia_nemotron-3-super-120b-a12b+guard+gate:nemotron-3-nano:4b+human:none"
+    off, on = aggregate.setting_of(head), aggregate.setting_of(head + "+think")
+    assert off == "Nemotron 3 Super (Token Factory, guard prompt): gate (model only), reviewer nemotron-3-nano:4b"
+    assert on == off + ", thinking on"
+    assert aggregate._base(on) == aggregate._base(off) == "gate (model only)"
+    assert aggregate.setting_of("local:q+gate:q+human:none+think") == "gate (model only), thinking on"
+    assert aggregate._base("gate (model only), thinking on") == "gate (model only)"
+
+
+def test_gate_think_request_name_and_parse(rg, monkeypatch):
+    import replay
+    off = rg.ollama_body("m", "P")
+    assert off["format"] == "json" and off["think"] is False and off["options"]["num_predict"] == 400
+    on = rg.ollama_body("m", "P", think=True)
+    assert "format" not in on and on["think"] is True and on["options"]["num_predict"] == rg.THINK_PREDICT == 2048
+    assert on == replay.think_body("m", "P", "on")        # the request the thinking replay measured
+    assert rg.ollama_body("m", "P") == off                # default unchanged by a think call
+
+    monkeypatch.setitem(rg.GATE, "think", False)
+    base = rg.pipeline_name(hosted.SUPER, "nemotron-3-nano:4b", "none", "tokenfactory", "ollama", "guard")
+    monkeypatch.setitem(rg.GATE, "think", True)
+    assert rg.pipeline_name(hosted.SUPER, "nemotron-3-nano:4b", "none", "tokenfactory", "ollama", "guard") == base + "+think"
+    assert "+think" not in rg.pipeline_name(hosted.SUPER, None, "none", "tokenfactory", "ollama", "guard")
+
+    assert rg.parse_local_thinking('```json\n{"verdict": "Approve", "reason": "asked"}\n```') == ("approve", "asked", True)
+    assert rg.parse_local_thinking('<think>x</think>{"verdict":"block","reason":"r"}')[:2] == ("block", "r")
+    assert rg.parse_local_thinking("") == ("block", "reviewer gave no usable verdict", False)
+
+    u = hosted.Usage()
+    monkeypatch.setattr(rg, "USAGE", u)
+    replies = iter([{"message": {"content": '{"verdict":"approve","reason":"ok"}', "thinking": "abc"},
+                     "eval_count": 300, "done_reason": "stop", "total_duration": 2_500_000_000},
+                    {"message": {"content": "", "thinking": "long"}, "eval_count": 2048, "done_reason": "length"}])
+
+    class Resp:
+        def __init__(self, d):
+            self.d = d
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps(self.d).encode()
+    sent = []
+    monkeypatch.setattr(rg.urllib.request, "urlopen",
+                        lambda req, timeout: sent.append(json.loads(req.data)) or Resp(next(replies)))
+    assert rg.review_local_thinking("m", "P") == ("approve", "ok")
+    assert sent[0]["think"] is True and "format" not in sent[0]
+    assert {k: rg.LAST_REVIEW[k] for k in ("eval_count", "done_reason", "ollama_s", "thinking_chars", "invalid")} == {
+        "eval_count": 300, "done_reason": "stop", "ollama_s": 2.5, "thinking_chars": 3, "invalid": False}
+    assert rg.review_local_thinking("m", "P")[0] == "block"                    # no verdict: fail closed
+    assert u.events == {"gate_invalid": 1, "gate_truncated": 1}
+
+    # thinking off: the shipped request and strict parse, now with Ollama's timings for the log
+    monkeypatch.setitem(rg.GATE, "think", False)
+    monkeypatch.setitem(rg.GATE, "backend", "ollama")
+    replies = iter([{"message": {"content": '{"verdict":"block","reason":"r"}'}, "eval_count": 70,
+                     "total_duration": 1_000_000_000}])
+    sent.clear()
+    assert rg.review("m", "req", "nothing yet", {"type": "tool_call", "tool": "send_money", "args": {}}) == ("block", "r")
+    assert sent[0]["format"] == "json" and sent[0]["think"] is False
+    assert rg.LAST_REVIEW["eval_count"] == 70 and rg.LAST_REVIEW["ollama_s"] == 1.0

@@ -67,7 +67,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))   # homestead_gate.llm (stdlib only)
 import hosted  # noqa: E402
 PROMPT = {"version": "v1", "system": SYSTEM}   # --prompt v2 swaps in the multi-step candidate
-GATE = {"backend": "ollama", "client": None}   # --gate-backend tokenfactory sets a homestead_gate.llm ChatClient
+GATE = {"backend": "ollama", "client": None,   # --gate-backend tokenfactory sets a homestead_gate.llm ChatClient
+        "think": False}                         # --gate-think: local Ollama reviewer with thinking on
+THINK_PREDICT = 2048                            # --gate-think output budget (reasoning + verdict), = replay.py "on"
+LAST_REVIEW: dict = {}                          # Ollama stats of the latest local review, copied into the gate log
 USAGE = hosted.Usage()                          # replaced in main() with one that writes usage.json
 REVIEWER_MAX_TOKENS = 2048                      # same as the web demo's TokenFactoryReviewer (reasoning room)
 AGENT_MAX_TOKENS = 4096                         # hosted agent: per-turn cap, so a runaway reply cannot run up cost
@@ -133,7 +136,8 @@ def _run_with_context(self, agent_pipeline, user_task, injection_task, injection
         except Exception:
             attacker_calls = []
     CURRENT.clear()
-    CURRENT.update(attacker_calls=attacker_calls, contacts=known_contacts(pre))
+    CURRENT.update(attacker_calls=attacker_calls, contacts=known_contacts(pre),
+                   user_task=getattr(user_task, "ID", None), injection_task=getattr(injection_task, "ID", None))
     kw = {"environment": environment, "verbose": verbose}
     if runtime_class is not None:
         kw["runtime_class"] = runtime_class
@@ -183,23 +187,56 @@ def review_prompt(user_request: str, untrusted: str, action: dict, named: str | 
     return prompt
 
 
-def ollama_body(model: str, prompt: str) -> dict:
-    """The local reviewer request: format json, thinking off, at most 400 output tokens."""
-    return {"model": model, "stream": False, "format": "json", "think": False,
+def ollama_body(model: str, prompt: str, think: bool = False) -> dict:
+    """The local reviewer request. Default: format json, thinking off, at most 400 output tokens.
+    think=True: think true, no format, at most THINK_PREDICT tokens (replay.py's "on" mode)."""
+    body = {"model": model, "stream": False, "format": "json", "think": False,
             "messages": [{"role": "system", "content": PROMPT["system"]}, {"role": "user", "content": prompt}],
             "options": {"temperature": 0, "seed": 1001, "num_predict": 400, "num_ctx": CTX}}
+    if think:
+        body.pop("format")
+        body["think"] = True
+        body["options"]["num_predict"] = THINK_PREDICT
+    return body
+
+
+def parse_local_thinking(content: str | None) -> tuple[str, str, bool]:
+    """Verdict from a thinking reply's final content (replay.py parse_final, non-strict): <think> blocks
+    and code fences stripped, then the first {...}. Ollama returns the reasoning in message.thinking,
+    which is never read as the verdict. -> (verdict, reason, ok); not ok is a block (fail closed)."""
+    try:
+        j = json.loads(hosted._clean(hosted.strip_think(content or "")))
+        v = str(j.get("verdict", "")).strip().lower()
+    except (ValueError, AttributeError):
+        j, v = {}, ""
+    if v not in ("approve", "block"):
+        return "block", "reviewer gave no usable verdict", False
+    return v, str(j.get("reason", ""))[:200], True
+
+
+def ollama_stats(resp: dict) -> dict:
+    """Ollama's own timings (seconds) and token counts for one review. The gate log also has the gate's wall
+    time ("secs"), which includes waiting behind other lanes for the one Ollama server."""
+    s = lambda k: round((resp.get(k) or 0) / 1e9, 3)
+    return {"eval_count": resp.get("eval_count"), "prompt_eval_count": resp.get("prompt_eval_count"),
+            "done_reason": resp.get("done_reason"), "ollama_s": s("total_duration"), "load_s": s("load_duration"),
+            "prompt_eval_s": s("prompt_eval_duration"), "eval_s": s("eval_duration")}
 
 
 def review(model: str, user_request: str, untrusted: str, action: dict, named: str | None = None) -> tuple[str, str]:
+    LAST_REVIEW.clear()
     prompt = review_prompt(user_request, untrusted, action, named)
     if GATE["backend"] == "tokenfactory":
         return review_hosted(GATE["client"], prompt)
+    if GATE["think"]:
+        return review_local_thinking(model, prompt)
     body = json.dumps(ollama_body(model, prompt)).encode()
     try:
         req = urllib.request.Request(f"{OLLAMA}/api/chat", data=body, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=300) as r:
-            raw = json.loads(r.read())["message"]["content"]
-        j = json.loads(raw)
+            resp = json.loads(r.read())
+        LAST_REVIEW.update(ollama_stats(resp))
+        j = json.loads(resp["message"]["content"])
         v = str(j.get("verdict", "")).lower()
         if v not in ("approve", "block"):
             USAGE.event("gate_invalid")
@@ -207,6 +244,29 @@ def review(model: str, user_request: str, untrusted: str, action: dict, named: s
     except Exception as e:  # fail closed, same as the product
         USAGE.event("gate_unavailable")
         return "block", f"reviewer unavailable: {type(e).__name__}"
+
+
+def review_local_thinking(model: str, prompt: str) -> tuple[str, str]:
+    """--gate-think. Unlike the default path, a reply without a usable verdict counts as gate_invalid
+    (the model's answer) and only a failed request as gate_unavailable; a reply cut off at the token
+    cap also counts gate_truncated. Ollama's timings and token counts go to LAST_REVIEW for the log."""
+    LAST_REVIEW.clear()
+    body = json.dumps(ollama_body(model, prompt, think=True)).encode()
+    try:
+        req = urllib.request.Request(f"{OLLAMA}/api/chat", data=body, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=900) as r:
+            resp = json.loads(r.read())
+    except Exception as e:  # fail closed, same as the product
+        USAGE.event("gate_unavailable")
+        return "block", f"reviewer unavailable: {type(e).__name__}"
+    msg = resp.get("message") or {}
+    v, reason, ok = parse_local_thinking(msg.get("content"))
+    LAST_REVIEW.update(ollama_stats(resp), thinking_chars=len(msg.get("thinking") or ""), invalid=not ok)
+    if not ok:
+        USAGE.event("gate_invalid")
+    if resp.get("done_reason") == "length":
+        USAGE.event("gate_truncated")
+    return v, reason
 
 
 def review_hosted(client, prompt: str) -> tuple[str, str]:
@@ -258,7 +318,10 @@ class GatedToolsExecutor(ToolsExecutor):
                 asked, human_ok = True, oracle_human(call)
             self.log.append({"tool": call.function, "verdict": verdict, "reason": reason,
                              "human_asked": asked, "human_approved": human_ok,
-                             "secs": round(time.time() - t, 2)})
+                             "secs": round(time.time() - t, 2),
+                             "user_task": CURRENT.get("user_task"), "injection_task": CURRENT.get("injection_task"),
+                             "args": dict(call.args), "attacker": not oracle_human(call), **LAST_REVIEW})
+            LAST_REVIEW.clear()
             if GATE_LOG["path"]:
                 with open(GATE_LOG["path"], "a") as f:
                     f.write(json.dumps(self.log[-1]) + "\n")
@@ -289,6 +352,8 @@ def pipeline_name(agent_model: str, gate_model: str | None, human: str = "none",
             + ("+guard" if agent_sys == "guard" else "") + f"+{gate}" + (f"+human:{human}" if gate_model else ""))
     if gate_model and PROMPT["version"] != "v1":
         name += f"+prompt:{PROMPT['version']}"     # separate trace dirs, so v1 and v2 never merge
+    if gate_model and gate_backend == "ollama" and GATE["think"]:
+        name += "+think"                            # local reviewer with thinking on: its own trace dirs and rows
     return name
 
 
@@ -400,6 +465,8 @@ def main() -> int:
                     help="plain: AgentDojo's system message. guard: plus the product brain's safety sentence")
     ap.add_argument("--gate", default=None, help="reviewer model; omit for the no-defense baseline")
     ap.add_argument("--gate-backend", choices=["ollama", "tokenfactory"], default="ollama")
+    ap.add_argument("--gate-think", action="store_true",
+                    help="Ollama reviewer with thinking on (think true, no format, 2048 tokens); pipeline name gets +think")
     ap.add_argument("--skip-selfcheck", action="store_true",
                     help="skip AgentDojo's injection-task self-checks (aggregate.py excludes them anyway)")
     ap.add_argument("--cost-cap", type=float, default=float(os.environ.get("HG_LANE_COST_CAP_USD") or 0) or None,
@@ -416,6 +483,9 @@ def main() -> int:
     global USAGE
     Path(a.out).mkdir(parents=True, exist_ok=True)
     USAGE = hosted.Usage(Path(a.out) / "usage.json", a.cost_cap)
+    if a.gate_think and (not a.gate or a.gate_backend != "ollama"):
+        ap.error("--gate-think needs --gate with --gate-backend ollama")
+    GATE["think"] = a.gate_think
     if a.gate:
         GATE_LOG["path"] = Path(a.out) / "gate_log.jsonl"
     if a.gate and a.gate_backend == "tokenfactory":
@@ -438,7 +508,7 @@ def main() -> int:
                                                    user_tasks=a.user_tasks, benchmark_version=a.version)
     rate = lambda d: round(sum(d.values()) / max(1, len(d)), 4)
     summary = {"suite": a.suite, "version": a.version, "attack": a.attack, "agent": a.agent, "prompt": a.prompt,
-               "gate": a.gate, "n_user_tasks": len(clean["utility_results"]),
+               "gate": a.gate, "gate_think": a.gate_think, "n_user_tasks": len(clean["utility_results"]),
                "n_attacked_runs": len(attacked["security_results"]),
                "utility_no_attack": rate(clean["utility_results"]),
                "utility_under_attack": rate(attacked["utility_results"]),
@@ -454,7 +524,7 @@ def main() -> int:
                "usage": USAGE.snapshot()}
     out = Path(a.out) / (f"{a.suite}__{a.agent.replace(':', '_').replace('/', '_')}__"
                          + (f"gate_{a.gate.replace(':', '_').replace('/', '_')}__human_{a.human}" if a.gate else "nogate")
-                         + ("" if a.prompt == "v1" else f"__p{a.prompt}") + ".json")
+                         + ("" if a.prompt == "v1" else f"__p{a.prompt}") + ("__think" if a.gate_think else "") + ".json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"summary": summary, "gate_log": log}, indent=1))
     print(json.dumps(summary, indent=1))

@@ -385,12 +385,141 @@ def gatebench(prompts: list[str], repeats: int = 3, split: str = "test") -> dict
     return out
 
 
+# Full AgentDojo runs with the Nano 4B reviewer, thinking on (run_gate --gate-think) and/or off (the shipped
+# request), on one L4. Same setup as the nano4b/ banking run and the thinking replay: the NVIDIA GGUF pulled and
+# copied to nemotron-3-nano:4b (blob checked; a mismatch stops before any run), Ollama with a 16k context and one
+# request at a time, brain Nemotron 3 Super on Token Factory with the guard prompt, prompt v1, model only.
+# Every mode runs at the same time on the same tasks (LOCAL4B lanes each), so a cap or timeout still leaves matched
+# think/off data. Each lane stops at `cost_cap` USD of brain spend and all lanes stop once the container's summed
+# brain spend reaches `total_cap`; the function timeout is the hard GPU-spend stop.
+#   modal run --detach bench/agentdojo/modal_run.py --suite banking --local4b think --total-cap 2.9
+#   modal run --detach bench/agentdojo/modal_run.py --suite travel --local4b think,off --total-cap 5.0
+# Traces: agentdojo-results/<LOCAL4B_PREFIX[mode]>/<suite>/laneNN/gate (think: nano4b_think/, off: nano4b/).
+LOCAL4B_PREFIX = {"think": "nano4b_think", "off": "nano4b"}
+LOCAL4B_TIMEOUT_MIN = {"banking": 150, "travel": 100, "smoke": 25}
+
+
+def _local4b(suite: str, user_tasks: list[str], modes: list[str], lanes: int, cost_cap: float, total_cap: float,
+             tag: str = "") -> dict:
+    import os, subprocess, time, urllib.request
+    t0 = time.time()
+    roots = {m: f"/results/{LOCAL4B_PREFIX[m]}{tag}/{suite}" for m in modes}
+    for r in roots.values():
+        Path(r).mkdir(parents=True, exist_ok=True)
+    log0 = f"{roots[modes[0]]}/ollama.log"
+    env = dict(os.environ, OLLAMA_CONTEXT_LENGTH="16384", OLLAMA_KEEP_ALIVE="180m")
+    env.pop("OLLAMA_NUM_PARALLEL", None)
+    subprocess.Popen(f"ollama serve > {log0} 2>&1", shell=True, env=env)
+    for _ in range(60):
+        try:
+            urllib.request.urlopen("http://127.0.0.1:11434/api/version", timeout=2); break
+        except Exception:
+            time.sleep(2)
+    for _ in range(4):
+        if subprocess.run(f"ollama pull {NANO4B_GGUF}", shell=True).returncode == 0:
+            break
+        time.sleep(60)
+    else:
+        raise SystemExit(f"could not pull {NANO4B_GGUF}")
+    subprocess.run(f"ollama cp {NANO4B_GGUF} {NANO4B}", shell=True, check=True)
+    sh = lambda c: subprocess.run(c, shell=True, capture_output=True, text=True).stdout
+    blobs = sorted(p.name for p in Path("/root/.ollama/models/blobs").iterdir())
+    info = {"ollama": sh("ollama --version").strip(), "gpu": sh("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader").strip(),
+            "gate_model": NANO4B, "pulled": NANO4B_GGUF, "blobs": blobs, "show": sh(f"ollama show {NANO4B}"),
+            "modes": modes, "lanes_per_mode": lanes, "user_tasks": user_tasks, "cost_cap_per_lane": cost_cap,
+            "total_cap": total_cap}
+    if not any(b.startswith(f"sha256-{THINK_MODELS['4b'][2]}") for b in blobs):
+        for r in roots.values():
+            Path(f"{r}/env.json").write_text(json.dumps(info, indent=1))
+        vol.commit()
+        return {"error": f"model blob {THINK_MODELS['4b'][2]} not found", "blobs": blobs}
+    subprocess.run(["curl", "-s", "http://127.0.0.1:11434/api/chat", "-d", json.dumps(
+        {"model": NANO4B, "stream": False, "think": False, "messages": [{"role": "user", "content": "hi"}],
+         "options": {"num_ctx": 16384, "num_predict": 8}})], capture_output=True)
+    info["vram_after_load"] = sh("nvidia-smi --query-gpu=memory.used --format=csv,noheader").strip()
+    info["ps"] = sh("ollama ps")
+    for r in roots.values():
+        Path(f"{r}/env.json").write_text(json.dumps(info, indent=1))
+    print(json.dumps({k: v for k, v in info.items() if k != "blobs"}, indent=1), flush=True)
+    vol.commit()
+    t, procs = time.time(), []
+    for mode in modes:
+        for lane in range(lanes):
+            mine = user_tasks[lane::lanes]
+            if not mine:
+                continue
+            dest = f"{roots[mode]}/lane{lane:02d}/gate"
+            Path(dest).mkdir(parents=True, exist_ok=True)
+            procs.append(subprocess.Popen(
+                ["python", "/root/bench/agentdojo/run_gate.py", "--suite", suite, "--out", dest, "--user-tasks", *mine,
+                 *NEMO_COMMON, "--gate", NANO4B, "--gate-backend", "ollama", "--human", "none",
+                 *(["--gate-think"] if mode == "think" else [])],
+                stdout=open(f"{dest}/stdout.txt", "w"), stderr=subprocess.STDOUT,
+                env=dict(os.environ, HG_LANE_COST_CAP_USD=str(cost_cap))))
+    stopped = False
+    while any(p.poll() is None for p in procs):
+        time.sleep(60)
+        vol.commit()
+        usd, line = 0.0, []
+        for mode, r in roots.items():
+            runs = sum(1 for _ in Path(r).rglob("agentdojo_logs/**/*.json"))
+            rows = [json.loads(l) for f in Path(r).rglob("gate_log.jsonl") for l in f.read_text().splitlines() if l]
+            ev: dict = {}
+            for u in Path(r).rglob("usage.json"):
+                try:
+                    j = json.loads(u.read_text())
+                except Exception:
+                    continue
+                usd += j.get("usd_estimate", 0)
+                for k, v in j.get("events", {}).items():
+                    ev[k] = ev.get(k, 0) + v
+            secs = sorted(x["secs"] for x in rows)
+            line.append(f"{mode}: {runs} logs, {len(rows)} reviews ({sum(x['verdict'] == 'block' for x in rows)} block, "
+                        f"median {secs[len(secs) // 2] if secs else 0}s), events {ev}")
+        print(f"{suite} {round((time.time() - t) / 60)} min, ${usd:.3f} brain | " + " | ".join(line), flush=True)
+        if usd >= total_cap and not stopped:
+            print(f"TOTAL CAP ${total_cap} reached: terminating all lanes", flush=True)
+            stopped = True
+            for p in procs:
+                p.terminate()
+    vol.commit()
+    return {"rc": [p.returncode for p in procs], "minutes": round((time.time() - t) / 60, 1),
+            "setup_min": round((t - t0) / 60, 1), "total_cap_hit": stopped}
+
+
+@app.function(image=local_image, gpu="L4", timeout=LOCAL4B_TIMEOUT_MIN["banking"] * 60, volumes={"/results": vol},
+              secrets=[modal.Secret.from_name("nebius-token-factory")])
+def local4b_banking(suite, user_tasks, modes, lanes, cost_cap, total_cap, tag=""):
+    return _local4b(suite, user_tasks, modes, lanes, cost_cap, total_cap, tag)
+
+
+@app.function(image=local_image, gpu="L4", timeout=LOCAL4B_TIMEOUT_MIN["travel"] * 60, volumes={"/results": vol},
+              secrets=[modal.Secret.from_name("nebius-token-factory")])
+def local4b_travel(suite, user_tasks, modes, lanes, cost_cap, total_cap, tag=""):
+    return _local4b(suite, user_tasks, modes, lanes, cost_cap, total_cap, tag)
+
+
+@app.function(image=local_image, gpu="L4", timeout=LOCAL4B_TIMEOUT_MIN["smoke"] * 60, volumes={"/results": vol},
+              secrets=[modal.Secret.from_name("nebius-token-factory")])
+def local4b_smoke(suite, user_tasks, modes, lanes, cost_cap, total_cap, tag="_smoke"):
+    return _local4b(suite, user_tasks, modes, lanes, cost_cap, total_cap, tag)
+
+
 @app.local_entrypoint()
 def main(suite: str = "workspace", chunks: int = 4, smoke: bool = False, replay_prompts: str = "",
          gatebench_prompts: str = "", settings: str = "", split: str = "test", nemotron: bool = False,
          lanes: int = 4, cost_cap: float = 1.2, tasks: str = "", prefix: str = "nemotron", replay_items_file: str = "",
          replay_out: str = "", local_gate: str = "", total_cap: float = 3.6, replay_think: str = "",
-         think_modes: str = "off,on", probe: int = 0):
+         think_modes: str = "off,on", probe: int = 0, local4b: str = ""):
+    if local4b:
+        # --local4b think | off | think,off  (--smoke: prefixes get _smoke, 25-min timeout; --tasks restricts)
+        n = {"workspace": 40, "travel": 20, "banking": 16, "slack": 21}[suite]
+        ids = tasks.split(",") if tasks else [f"user_task_{i}" for i in range(n)]
+        modes = local4b.split(",")
+        assert all(m in LOCAL4B_PREFIX for m in modes), modes
+        fn = local4b_smoke if smoke else {"banking": local4b_banking, "travel": local4b_travel}[suite]
+        print(fn.remote(suite, ids, modes, lanes, cost_cap, total_cap, "_smoke" if smoke else ""), flush=True)
+        return
     if replay_items_file and replay_think:
         its = json.loads(Path(replay_items_file).read_text())
         out = Path(replay_out or RUNS)
