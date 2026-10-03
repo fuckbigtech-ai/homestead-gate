@@ -27,9 +27,11 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from subprocess import TimeoutExpired      # by name: tests swap the subprocess module out
 
 SERVICE = "homestead-gate-smtp"
 IMAP_SERVICE = "homestead-gate-imap"
+LOOKUP_TIMEOUT_S = 20
 HOME = Path.home() / ".homestead-gate"
 CONFIG = HOME / "smtp.toml"
 
@@ -77,12 +79,15 @@ def _store_secret(service: str, user: str, label: str) -> None:
 
 
 def _load_secret(service: str, user: str) -> str | None:
-    if _backend() == "keychain":
-        r = subprocess.run(["security", "find-generic-password", "-s", service, "-a", user, "-w"],
-                           capture_output=True, text=True)
-    else:
-        r = subprocess.run(["secret-tool", "lookup", "service", service, "user", user],
-                           capture_output=True, text=True)
+    # A timeout, because the store may answer with a permission dialog that nobody is there to
+    # click (launchd, cron): an unattended pass must fail, not hang holding its lock.
+    argv = (["security", "find-generic-password", "-s", service, "-a", user, "-w"] if _backend() == "keychain"
+            else ["secret-tool", "lookup", "service", service, "user", user])
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=LOOKUP_TIMEOUT_S)
+    except TimeoutExpired:
+        raise CredentialError(f"the credential store did not answer within {LOOKUP_TIMEOUT_S}s "
+                              "(a permission dialog nobody answered?)") from None
     pw = (r.stdout or "").rstrip("\n")
     return pw if r.returncode == 0 and pw else None
 

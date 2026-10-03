@@ -774,7 +774,8 @@ def main(argv=None) -> int:
     asp.add_argument("--task", help="what you want done; the reviewer trusts only this")
     asp.add_argument("--skill", help="a skill from the data dir's skills.toml (defaults: triage, pay, summarize)")
     asp.add_argument("--skills", action="store_true", help="list your skills (skills.toml) and exit")
-    asp.add_argument("--data", help="demo data dir: fake inbox, bills, memory, policy, skills, receipts (default ~/.homestead-gate/assistant)")
+    asp.add_argument("--data", help="data dir: inbox, bills, memory, policy, skills, receipts (default ~/.homestead-gate/assistant, "
+                          "seeded with the fake demo; use another for your real inbox)")
     asp.add_argument("--watch", action="store_true",
                      help="always-on: run a skill (default triage) over NEW mail on a schedule, leave a brief")
     asp.add_argument("--every", help="with --watch: how often, e.g. 15m or 1h (default: the skill's schedule, else 15m)")

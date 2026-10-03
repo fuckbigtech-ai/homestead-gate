@@ -460,5 +460,6 @@ def sync_configured(data: Path, *, connect: Callable | None = None, now: datetim
     except credstore.CredentialError as e:
         raise MailboxError("config", f"cannot read the IMAP password: {e}") from None
     if not password:
-        raise MailboxError("config", f"no IMAP password stored for {cfg.user}. Run --imap-setup again (same --data).")
+        raise MailboxError("config", f"no IMAP password for {cfg.user}: it is missing, or the credential store "
+                                     "refused to hand it over. Run --imap-setup again (same --data).")
     return sync(data, cfg, password, connect=connect, now=now)

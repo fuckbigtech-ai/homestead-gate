@@ -78,8 +78,16 @@ homestead-gate assistant --data ~/.homestead-gate/mail --watch --once  # sync, t
 Use the same `--data` every time, and not the demo's: `--imap-setup` refuses a data dir that holds
 the demo's fake inbox, and `--demo-new-mail` refuses a dir that reads a real one. A new dir gets an
 empty inbox, no bills, an empty memory, the default skills, and a policy whose `[user] email` is the
-address you log in with. The launchd plist under [Always on](#always-on) needs the same `--data` added, and should run the
-same install you ran `--imap-setup` from (the keychain lets that program read the password silently).
+address you log in with. The launchd plist under [Always on](#always-on) needs the same `--data` added.
+
+On macOS the first `--sync` may show a keychain dialog asking whether `security` may use the
+`homestead-gate-imap` item. Unattended `--watch` runs need "Always Allow". The trade-off: after
+that, any program running as you can read that item through `security` without being asked. If
+nobody answers the dialog (under launchd), the keychain read gives up after 20 seconds and the pass
+runs on the inbox it already has.
+
+The first pass can bring up to 50 messages. The brain has 12 steps per pass, so it opens only some
+of them, but all of them count as handled; the brief lists every one under "New mail".
 
 Gmail accepts only an app password here, not your normal password:
 

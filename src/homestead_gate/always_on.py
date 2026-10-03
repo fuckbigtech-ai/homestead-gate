@@ -235,7 +235,7 @@ def run_pass(data: Path, skill: Skill, *, llm, reviewer, now: datetime | None = 
         dated = data / BRIEFS_DIR / f"{now.strftime('%Y-%m-%d-%H%M%S')}.md"
         dated.write_text(p.brief)
         p.brief_path = str(data / BRIEF_FILE)
-    if p.new_mail or p.error:
+    if p.new_mail or p.error or p.sync_failed:
         (notify_fn or notify)("homestead", _counts(p))      # looked up now, so it can be replaced
     return p
 
@@ -312,8 +312,8 @@ def _collect(p: Pass, bot, names: dict) -> None:
 def _counts(p: Pass) -> str:
     if p.error:
         return "a scheduled run failed; see the brief"
-    return (f"{len(p.new_mail)} new, {len(p.done)} done, "
-            f"{len(p.waiting) + p.earlier_waiting} waiting for you")
+    return ("mail sync failed, see the brief; " if p.sync_failed else "") + (
+        f"{len(p.new_mail)} new, {len(p.done)} done, {len(p.waiting) + p.earlier_waiting} waiting for you")
 
 
 def render_brief(p: Pass, last_run: str | None = None) -> str:

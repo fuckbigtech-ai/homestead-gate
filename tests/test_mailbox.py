@@ -400,3 +400,20 @@ def test_watch_pass_on_real_mail_and_continues_when_the_network_is_down(tmp_path
     brief = (data / "brief.md").read_text()
     assert "**Mail sync failed:** could not reach" in brief and "used the inbox as it was" in brief
     assert "The run did not finish" not in brief and "imap-777-2" in json.dumps(always_on.load_state(data))
+    assert notes[-1].startswith("mail sync failed") and "gmail" not in notes[-1]   # counts only, no account
+
+
+def test_unanswered_keychain_dialog_fails_the_sync_not_the_pass(tmp_path, monkeypatch, store):
+    data = fresh(tmp_path)
+    store.items[(credstore.IMAP_SERVICE, USER)] = PASSWORD
+
+    def hangs(args, *a, **kw):
+        assert kw.get("timeout"), "a keychain read without a timeout can hang an unattended pass"
+        raise credstore.TimeoutExpired(args, kw["timeout"])
+    monkeypatch.setattr(credstore, "subprocess", types.SimpleNamespace(run=hangs))
+    notes = []
+    p = always_on.run_pass(data, sk.load_skills(data)["summarize"], llm=brain(), reviewer=FakeReviewer(),
+                           log=lambda s: None, notify_fn=lambda a, b: notes.append(b),
+                           sync=lambda: mailbox.sync_configured(data, connect=FakeIMAP()))
+    assert p.sync_failed and "did not answer within" in p.sync and p.error is None and not p.skipped
+    assert notes == ["mail sync failed, see the brief; 0 new, 0 done, 0 waiting for you"]
