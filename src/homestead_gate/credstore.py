@@ -14,6 +14,10 @@ sandbox hides the gate's config.
 Non-secret settings (host, port, user, starttls) go to ~/.homestead-gate/smtp.toml, mode 0600.
 The password is only ever typed by the human into the credential store's own prompt; it is never
 an argument, an environment variable, a log line or a receipt.
+
+The assistant's read-only IMAP login (mailbox.py) is a separate entry, "homestead-gate-imap", so a
+password saved for reading mail is never used to send: live email still needs `creds set-smtp`
+and `--live`.
 """
 from __future__ import annotations
 
@@ -23,8 +27,11 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from subprocess import TimeoutExpired      # by name: tests swap the subprocess module out
 
 SERVICE = "homestead-gate-smtp"
+IMAP_SERVICE = "homestead-gate-imap"
+LOOKUP_TIMEOUT_S = 20
 HOME = Path.home() / ".homestead-gate"
 CONFIG = HOME / "smtp.toml"
 
@@ -51,23 +58,53 @@ def _write_config(host: str, port: int, user: str, starttls: bool) -> None:
     os.chmod(CONFIG, 0o600)
 
 
-def store_smtp(host: str, port: int, user: str, starttls: bool = True) -> None:
-    """Save settings and have the OS store prompt the human for the password (interactive)."""
-    backend = _backend()
-    for field, value in (("host", host), ("user", user)):
-        if not value or any(c in value for c in '"\n\\'):
-            raise CredentialError(f"invalid {field}")
-    if backend == "keychain":
+def check_value(field: str, value: str) -> None:
+    """Settings are written into TOML by hand; refuse anything that could break out of a string."""
+    if not value or any(c in value for c in '"\n\\'):
+        raise CredentialError(f"invalid {field}")
+
+
+def _store_secret(service: str, user: str, label: str) -> None:
+    """Have the OS store prompt the human for the secret (interactive). It never passes through here."""
+    if _backend() == "keychain":
         # `-w` as the LAST argument makes `security` prompt for the password on the terminal, so it
         # never appears in argv or the process list. -T limits silent access to this interpreter.
-        r = subprocess.run(["security", "add-generic-password", "-U", "-s", SERVICE, "-a", user,
+        r = subprocess.run(["security", "add-generic-password", "-U", "-s", service, "-a", user,
                             "-T", sys.executable, "-w"])
     else:
         # secret-tool reads the secret from stdin/tty itself.
-        r = subprocess.run(["secret-tool", "store", "--label", "homestead-gate smtp",
-                            "service", SERVICE, "user", user])
+        r = subprocess.run(["secret-tool", "store", "--label", label, "service", service, "user", user])
     if r.returncode != 0:
         raise CredentialError("the credential store did not save the password")
+
+
+def _load_secret(service: str, user: str) -> str | None:
+    # A timeout, because the store may answer with a permission dialog that nobody is there to
+    # click (launchd, cron): an unattended pass must fail, not hang holding its lock.
+    argv = (["security", "find-generic-password", "-s", service, "-a", user, "-w"] if _backend() == "keychain"
+            else ["secret-tool", "lookup", "service", service, "user", user])
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=LOOKUP_TIMEOUT_S)
+    except TimeoutExpired:
+        raise CredentialError(f"the credential store did not answer within {LOOKUP_TIMEOUT_S}s "
+                              "(a permission dialog nobody answered?)") from None
+    pw = (r.stdout or "").rstrip("\n")
+    return pw if r.returncode == 0 and pw else None
+
+
+def _delete_secret(service: str, user: str) -> None:
+    if _backend() == "keychain":
+        subprocess.run(["security", "delete-generic-password", "-s", service, "-a", user], capture_output=True)
+    else:
+        subprocess.run(["secret-tool", "clear", "service", service, "user", user], capture_output=True)
+
+
+def store_smtp(host: str, port: int, user: str, starttls: bool = True) -> None:
+    """Save settings and have the OS store prompt the human for the password (interactive)."""
+    _backend()
+    for field, value in (("host", host), ("user", user)):
+        check_value(field, value)
+    _store_secret(SERVICE, user, "homestead-gate smtp")
     _write_config(host, port, user, starttls)
 
 
@@ -76,18 +113,27 @@ def load_smtp() -> dict | None:
     if not CONFIG.exists():
         return None
     cfg = tomllib.loads(CONFIG.read_text())
-    backend = _backend()
-    if backend == "keychain":
-        r = subprocess.run(["security", "find-generic-password", "-s", SERVICE, "-a", cfg["user"], "-w"],
-                           capture_output=True, text=True)
-    else:
-        r = subprocess.run(["secret-tool", "lookup", "service", SERVICE, "user", cfg["user"]],
-                           capture_output=True, text=True)
-    pw = (r.stdout or "").rstrip("\n")
-    if r.returncode != 0 or not pw:
+    pw = _load_secret(SERVICE, cfg["user"])
+    if pw is None:
         return None
     return {"host": cfg["host"], "port": int(cfg.get("port", 587)), "user": cfg["user"],
             "starttls": bool(cfg.get("starttls", True)), "password": pw}
+
+
+def store_imap(user: str) -> None:
+    """The assistant's IMAP password, typed by the human into the OS store's own prompt. The
+    settings (host, port, mailbox) live in the assistant's policy.toml, not here."""
+    _backend()
+    check_value("user", user)
+    _store_secret(IMAP_SERVICE, user, "homestead-gate imap (read-only)")
+
+
+def load_imap_password(user: str) -> str | None:
+    return _load_secret(IMAP_SERVICE, user)
+
+
+def clear_imap(user: str) -> None:
+    _delete_secret(IMAP_SERVICE, user)
 
 
 def status() -> str:
@@ -108,11 +154,6 @@ def clear() -> None:
         return
     cfg = tomllib.loads(CONFIG.read_text())
     try:
-        backend = _backend()
-        if backend == "keychain":
-            subprocess.run(["security", "delete-generic-password", "-s", SERVICE, "-a", cfg["user"]],
-                           capture_output=True)
-        else:
-            subprocess.run(["secret-tool", "clear", "service", SERVICE, "user", cfg["user"]], capture_output=True)
+        _delete_secret(SERVICE, cfg["user"])
     finally:
         CONFIG.unlink(missing_ok=True)

@@ -54,16 +54,86 @@ homestead-gate assistant --pending                           # answer what the s
 homestead-gate assistant --memory                            # what it remembers, and who wrote each fact
 homestead-gate assistant --remember "Sam Rivera" wallet 0x...  # save a fact as yours
 homestead-gate assistant --skills                            # your skills (skills.toml)
+homestead-gate assistant --data ~/.homestead-gate/mail --imap-setup  # your real inbox, read-only (below)
+homestead-gate assistant --data ~/.homestead-gate/mail --sync        # fetch new mail once
 homestead-gate assistant --task "..." --data DIR
 homestead-gate assistant --backend nim ...                   # NVIDIA's hosted API instead (NVIDIA_API_KEY)
 ```
 
-The data is fake: an inbox, one bill, a memory, a policy and three skills, written to
+By default the data is fake: an inbox, one bill, a memory, a policy and three skills, written to
 `~/.homestead-gate/assistant` (or `--data DIR`) on first run. That directory also holds the
 assistant's own receipts, outbox, briefs and state, separate from the gate's. Email is dry-run
 unless you pass `--live`, the same as `up`. Payments are unsigned Sepolia transactions. The inbox
-is a JSON file: there is no mail connector yet, so "new mail" is whatever lands in that file
-(`--demo-new-mail` delivers the demo's second batch).
+is a JSON file (`inbox.json`); in the demo, `--demo-new-mail` delivers a second batch into it. To
+put your real mail there instead, see the next section.
+
+### Your real inbox (read-only)
+
+```bash
+homestead-gate assistant --data ~/.homestead-gate/mail --imap-setup    # server (default imap.gmail.com) and your address; then the OS asks for the password
+homestead-gate assistant --data ~/.homestead-gate/mail --sync          # fetch new mail once, print how many arrived
+homestead-gate assistant --data ~/.homestead-gate/mail --watch --once  # sync, then one pass over the new mail
+```
+
+Use the same `--data` every time, and not the demo's: `--imap-setup` refuses a data dir that holds
+the demo's fake inbox, and `--demo-new-mail` refuses a dir that reads a real one. A new dir gets an
+empty inbox, no bills, an empty memory, the default skills, and a policy whose `[user] email` is the
+address you log in with. The launchd plist under [Always on](#always-on) needs the same `--data` added.
+
+On macOS the first `--sync` may show a keychain dialog asking whether `security` may use the
+`homestead-gate-imap` item. Unattended `--watch` runs need "Always Allow". The trade-off: after
+that, any program running as you can read that item through `security` without being asked. If
+nobody answers the dialog (under launchd), the keychain read gives up after 20 seconds and the pass
+runs on the inbox it already has.
+
+The first pass can bring up to 50 messages. The brain has 12 steps per pass, so it opens only some
+of them, but all of them count as handled; the brief lists every one under "New mail".
+
+Gmail accepts only an app password here, not your normal password:
+
+1. Turn on 2-Step Verification: https://myaccount.google.com/security
+2. Create an app password: https://myaccount.google.com/apppasswords
+3. Run `--imap-setup` and paste the 16 letters into the password prompt.
+
+Some work, school and Advanced Protection accounts do not offer app passwords.
+
+How it reads your mail:
+
+- **Read-only at the protocol level.** The mailbox is opened with `EXAMINE`, and messages are fetched
+  with `BODY.PEEK[]`, so nothing is marked as read. The only commands sent are `LOGIN`, `EXAMINE`,
+  `UID SEARCH`, `UID FETCH` and `LOGOUT`. The code refuses any other UID command, and a test fails if
+  it calls store, copy, move, expunge, append, delete or close. This is a property of this code, not
+  of the password: an app password can do anything to your mailbox, and can send mail too. Here it is
+  only used to read.
+- **What it fetches.** The first sync gets the last 3 days, at most 50 messages, newest first. Later
+  syncs get only messages newer than the last one seen. If the server renumbers the mailbox
+  (`UIDVALIDITY` changes), the sync starts over from the last 3 days, and the `Message-ID` check keeps
+  messages from appearing twice. `days`, `max_messages` and `mailbox` are in the `[imap]` section of
+  the data dir's `policy.toml`.
+- **What it keeps.** For each message: the sender, subject, date and text. The text is the plain-text
+  part, or else the HTML part with the tags removed, cut at 8,000 characters. At most the first
+  512 KB of a message is downloaded. Attachments are never kept; the inbox notes only their names.
+- **The password.** It is stored in the OS credential store under its own entry,
+  `homestead-gate-imap`, and you type it into the store's own prompt. It is never written to a file
+  or a log, never passed as an argument, and never shown in an error message. The entry is separate
+  from the SMTP one, so reading mail can never turn on sending. Email stays dry-run until you run
+  `creds set-smtp` and pass `--live`, and `--watch` never sends live mail.
+- **When the server is unreachable.** `--watch` syncs before each pass. If the server cannot be
+  reached, or refuses the login, the pass still runs on the inbox as it was, and the brief says so.
+
+**What goes to the cloud.** The brain is Nemotron 3 Super on Nebius Token Factory, a cloud service,
+and it needs to read your mail to do its job. `list_inbox` sends it the sender, subject and date of
+each new message. `read_email` sends it the full text of each message it opens (up to the
+8,000-character cut). Facts it looks up from memory are sent to it too. So the text of your email
+does leave your machine. These stay on your machine:
+
+- the memory store;
+- the receipts;
+- the reviewer, Nemotron 3 Nano 4B, which runs locally;
+- your approvals.
+
+Your mail is also kept on your machine as plain files in the data dir: `inbox.json`, the reads held
+in `pending.json`, and the briefs. The dir is created with mode 0700.
 
 ### Always on
 
@@ -449,8 +519,9 @@ ETH Zurich's own tasks, attacks and scoring; the merge script recomputes every n
 write-up keeps the failed attempts (prompt v3 and v4 failed our held-out check, v5 did not beat v1 on travel).
 
 **Does it phone home?** No. The gate, its reviewer and the receipts run on your machine. The only network
-calls are the ones you configure: the cloud brain (Nebius Token Factory or NVIDIA NIM) and the email server
-you give it. The gate sends no telemetry.
+calls are the ones you configure: the cloud brain (Nebius Token Factory or NVIDIA NIM), the email server
+you give it for sending, and the IMAP server if you connect your real inbox. The brain receives the mail
+it reads ([what goes to the cloud](#your-real-inbox-read-only)). The gate sends no telemetry.
 
 **Who is it for?** Anyone letting an AI assistant touch their email or money: the person who wants the
 assistant to pay bills and answer mail, and doesn't want one poisoned email to empty the inbox to a stranger.
