@@ -5,6 +5,8 @@
   homestead-gate assistant --pending               # approve or deny what the passes held for you
 
 One pass:
+  0. If a real inbox is set up (mailbox.py, read-only IMAP), sync it first. A failed sync does not
+     stop the pass: it runs on the inbox as it was, and the brief says so.
   1. Read state.json in the data dir: the ids of the mail already handled.
   2. If nothing is new, write a short brief and stop. The cloud model is not called.
   3. Otherwise run one skill (triage by default) with list_inbox and read_email limited to the
@@ -36,6 +38,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import assistant as asst
+from . import mailbox
 from .approval import HumanDecision
 from .core import Gate
 from .llm import LLMError
@@ -165,6 +168,8 @@ class Pass:
     final: str | None = None
     error: str | None = None
     skipped: str | None = None
+    sync: str | None = None          # what the mail sync did, or why it could not
+    sync_failed: bool = False
     brief: str = ""
     brief_path: str = ""
 
@@ -191,9 +196,11 @@ class _Lock:
 
 def run_pass(data: Path, skill: Skill, *, llm, reviewer, now: datetime | None = None,
              notify_fn: Callable[[str, str], bool] | None = None, log: Callable[[str], None] = print,
-             guard_prompt: bool = True, max_steps: int = 12, make_bot=None, wrap_submit=None) -> Pass:
+             guard_prompt: bool = True, max_steps: int = 12, make_bot=None, wrap_submit=None,
+             sync: Callable[[], "mailbox.SyncResult"] | None = None) -> Pass:
     """One scheduled pass over the new mail. make_bot and wrap_submit let a caller watch the run
-    (the web demo uses them to show each step); they cannot change who approves."""
+    (the web demo uses them to show each step); they cannot change who approves. sync, when given,
+    fetches real mail into inbox.json first, under the same lock."""
     data = Path(data)
     now = now or datetime.now()
     p = Pass(at=now.strftime("%Y-%m-%d %H:%M"), skill=skill.name, instruction=skill.instruction)
@@ -201,6 +208,12 @@ def run_pass(data: Path, skill: Skill, *, llm, reviewer, now: datetime | None = 
         if not got:
             p.skipped = "another pass is running"
             return p
+        if sync is not None:
+            try:
+                p.sync = sync().summary()
+            except mailbox.MailboxError as e:
+                # not p.error: the pass still runs, on the inbox as it was
+                p.sync, p.sync_failed = f"{e}\nThis pass used the inbox as it was.", True
         state = load_state(data)
         previous = state.get("last_run")
         p.new_mail = [{k: m.get(k) for k in ("id", "from", "subject")} for m in new_mail(data, state)]
@@ -309,6 +322,8 @@ def render_brief(p: Pass, last_run: str | None = None) -> str:
              f"Skill **{p.skill}**, in your words: \"{p.instruction}\"", ""]
     if p.skipped:
         return "\n".join(lines + [f"Skipped: {p.skipped}.", ""])
+    if p.sync:
+        lines += [("**Mail sync failed:** " if p.sync_failed else "Mail sync: ") + p.sync.replace("\n", "  \n"), ""]
     lines.append(f"**{len(p.new_mail)} new email{'s' if len(p.new_mail) != 1 else ''}**{since}.")
     if not p.new_mail:
         lines.append("Nothing new, so the cloud model was not called.")

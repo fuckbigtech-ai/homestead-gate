@@ -475,13 +475,69 @@ def _print_facts(memory) -> None:
               + f"; source: {f['source']}")
 
 
+def _imap_setup(a, data: Path) -> int:
+    """Settings into the data dir's policy.toml; the password into the OS credential store, typed
+    by you into its own prompt. Connects to nothing: run --sync next."""
+    from . import credstore, mailbox
+    old = mailbox.load_config(data)
+    host_default = old.host if old else "imap.gmail.com"
+    host = _ask(f"  IMAP server [{host_default}]: ") or host_default
+    user = _ask("  your email address (the IMAP login)" + (f" [{old.user}]" if old else "") + ": ") or (
+        old.user if old else "")
+    if not user:
+        print("imap setup: no user given; nothing saved.", file=sys.stderr)
+        return 2
+    cfg = mailbox.ImapConfig(host=host, user=user, **({k: getattr(old, k) for k in ("port", "mailbox", "days", "max_messages")}
+                                                      if old and old.host == host else {}))
+    try:
+        credstore.check_value("host", host)
+        credstore.check_value("user", user)
+        wrote = mailbox.prepare_data_dir(data, user, a.model or ASSISTANT_REVIEWER)
+        if wrote:
+            print(f"  data dir: {data} (wrote {', '.join(wrote)})")
+        if mailbox.is_gmail(host):
+            print(f"  Gmail wants an app password here, not your normal one: {mailbox.APP_PASSWORDS}")
+            print("  (it needs 2-Step Verification on the account)")
+        print("  the OS credential store asks for the password now; it never passes through homestead-gate.")
+        credstore.store_imap(user)
+        mailbox.write_config(data, cfg)
+    except (credstore.CredentialError, mailbox.MailboxError) as e:
+        print(f"imap setup: {e}", file=sys.stderr)
+        return 2
+    print(f"saved: {user} on {host}:{cfg.port}, mailbox {cfg.mailbox}, read-only. Settings: {data / 'policy.toml'}")
+    print(f"next:  homestead-gate assistant --data {data} --sync")
+    return 0
+
+
+def _imap_sync(data: Path) -> int:
+    from . import mailbox
+    try:
+        r = mailbox.sync_configured(data)
+    except mailbox.MailboxError as e:
+        print(f"sync: {e}", file=sys.stderr)
+        return 2 if e.kind == "config" else 1
+    print(f"sync: {r.summary()}")
+    for m in r.new:
+        print(f"  {m['id']}  {m['from']}: {m['subject']}")
+    return 0
+
+
 def cmd_assistant(a) -> int:
-    from . import always_on
+    from . import always_on, mailbox
     from . import assistant as asst
     from .llm import ChatClient, LLMError
     from .skills import SkillError, load_skills, parse_interval
 
     data = _assistant_data(a)
+    # ---- real mail (read-only IMAP): before any seeding, so a real data dir never gets the demo
+    if a.imap_setup:
+        return _imap_setup(a, data)
+    if a.sync:
+        return _imap_sync(data)
+    if a.demo_new_mail and mailbox.load_config(data):
+        print("assistant: this data dir reads your real inbox; --demo-new-mail would put fake mail in it.",
+              file=sys.stderr)
+        return 2
     # ---- things that need no cloud model and no API key
     if a.memory or a.remember or a.skills or a.demo_new_mail or a.pending:
         _assistant_seed(a, data)
@@ -583,11 +639,18 @@ def cmd_assistant(a) -> int:
             return 2
         print(f"  watching: skill {skill.name} " + ("once" if a.once else f"every {every}s") +
               f"; anything that needs you is held (see it with: homestead-gate assistant --pending)")
+        imap = mailbox.load_config(data)
+        if imap:
+            print(f"  inbox:    {imap.user} on {imap.host}, read-only, synced before each pass. The mail "
+                  "the brain reads is sent to it.")
         n = 0
         while True:
             p = always_on.run_pass(data, skill, llm=llm, reviewer=reviewer, guard_prompt=not a.unguarded_prompt,
-                                   max_steps=a.max_steps, log=print)
+                                   max_steps=a.max_steps, log=print,
+                                   sync=(lambda: mailbox.sync_configured(data)) if imap else None)
             n += 1
+            if p.sync:
+                print(("sync FAILED: " if p.sync_failed else "sync: ") + p.sync)
             if p.skipped:
                 print(f"[{p.at}] skipped: {p.skipped}")
             else:
@@ -722,6 +785,10 @@ def main(argv=None) -> int:
     asp.add_argument("--remember", nargs=3, metavar=("NAME", "FIELD", "VALUE"),
                      help="save a fact as yours, e.g. --remember \"Sam Rivera\" wallet 0x...")
     asp.add_argument("--demo-new-mail", action="store_true", help="deliver the demo's later mail into the fake inbox")
+    asp.add_argument("--imap-setup", action="store_true",
+                     help="read your real inbox (read-only IMAP): asks server and user; the OS store asks for the app password")
+    asp.add_argument("--sync", action="store_true",
+                     help="fetch new mail from your real inbox once (read-only), print how many are new, exit")
     asp.add_argument("--smoke", action="store_true", help="one live call to the backend with one tool, then exit")
     asp.add_argument("--base-url", help="override the backend's base URL")
     asp.add_argument("--llm-model", help="override the backend's model")
