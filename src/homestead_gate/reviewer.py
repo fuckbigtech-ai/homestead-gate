@@ -13,6 +13,7 @@ approve/block, the verdict is "invalid", and the gate treats invalid exactly lik
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -63,16 +64,44 @@ def render(*, user_identity: str | None, user_intent: str, known_contacts: list[
             f"PROPOSED ACTION: {json.dumps(action)}")
 
 
+# think=True is the setting AgentDojo measured for Nemotron 3 Nano 4B (bench/agentdojo/RESULTS.md, "Nano 4B
+# with thinking"): the model reasons before its verdict, at most THINK_PREDICT output tokens, 16K context.
+# It cut legitimate calls blocked per banking run from 4.09 to 0.54 at about 4x the review time. The
+# reasoning comes back in message.thinking and is never read as the verdict. GateBench's published numbers
+# are for think=False, which stays the default here.
+THINK_PREDICT = 2048
+THINK_CTX = 16384
+_THINK_TAG = re.compile(r"<think>.*?</think>", re.S)
+_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
+
+
+def _final_json(text: str) -> str:
+    """The verdict object from a thinking reply's final content: think tags and code fences removed,
+    then the first {...}. Anything else stays as is and fails parse(), which fails closed."""
+    text = _FENCE.sub("", _THINK_TAG.sub("", text or "").strip()).strip()
+    if not text.startswith("{"):
+        m = re.search(r"\{.*\}", text, re.S)
+        text = m.group(0) if m else text
+    return text
+
+
 class OllamaReviewer:
-    def __init__(self, model: str = DEFAULT_MODEL, url: str = DEFAULT_URL, timeout_s: float = 120):
-        self.model, self.url, self.timeout_s = model, url.rstrip("/"), timeout_s
+    def __init__(self, model: str = DEFAULT_MODEL, url: str = DEFAULT_URL, timeout_s: float = 120,
+                 think: bool = False):
+        self.model, self.url, self.timeout_s, self.think = model, url.rstrip("/"), timeout_s, think
+
+    def body(self, prompt: str) -> dict:
+        body = {"model": self.model, "stream": False, "format": "json", "think": False,
+                "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
+                "options": {"temperature": 0, "seed": 1001, "num_predict": 400, "num_ctx": 4096}}
+        if self.think:
+            body.pop("format")
+            body["think"] = True
+            body["options"].update(num_predict=THINK_PREDICT, num_ctx=THINK_CTX)
+        return body
 
     def review(self, prompt: str) -> Verdict:
-        body = json.dumps({
-            "model": self.model, "stream": False, "format": "json", "think": False,
-            "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
-            "options": {"temperature": 0, "seed": 1001, "num_predict": 400, "num_ctx": 4096},
-        }).encode()
+        body = json.dumps(self.body(prompt)).encode()
         t = time.time()
         try:
             req = urllib.request.Request(f"{self.url}/api/chat", data=body,
@@ -85,7 +114,7 @@ class OllamaReviewer:
             return Verdict("invalid", why, "", self.model, round(time.time() - t, 2))
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
             return Verdict("invalid", f"reviewer unavailable: {e}", "", self.model, round(time.time() - t, 2))
-        return parse(raw, self.model, round(time.time() - t, 2))
+        return parse(_final_json(raw) if self.think else raw, self.model, round(time.time() - t, 2))
 
 
 def parse(raw: str, model: str, secs: float) -> Verdict:

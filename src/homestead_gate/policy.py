@@ -44,6 +44,7 @@ class Policy:
     model: str = "qwen3.5:9b"
     ollama_url: str = "http://127.0.0.1:11434"
     review_timeout_s: float = 120
+    review_think: bool = False       # [review] think = true: the reviewer reasons first (slower, fewer false blocks)
     override_delay_s: float = 60
     approval_timeout_s: float = 300
     _recent: deque = field(default_factory=deque, repr=False)
@@ -64,7 +65,7 @@ class Policy:
             daily_auto_value_eth=float(v.get("daily_auto_value_eth", 0.035)),
             max_actions_per_hour=int(lim.get("max_actions_per_hour", 20)),
             model=rv.get("model", "qwen3.5:9b"), ollama_url=rv.get("ollama_url", "http://127.0.0.1:11434"),
-            review_timeout_s=float(rv.get("timeout_s", 120)),
+            review_timeout_s=float(rv.get("timeout_s", 120)), review_think=bool(rv.get("think", False)),
             override_delay_s=float(ap.get("override_delay_s", 60)),
             approval_timeout_s=float(ap.get("timeout_s", 300)),
         )

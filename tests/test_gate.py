@@ -334,3 +334,56 @@ def test_reviewer_banner_says_local_only_when_it_is():
     from homestead_gate.cli import where
     assert where("http://127.0.0.1:11434") == "local" and where("http://localhost:11434") == "local"
     assert where("https://abc.modal.run") == "remote: abc.modal.run"
+
+
+# ---- a refused action stays refused for the session -----------------------------------------
+
+def test_identical_retry_of_a_refused_action_is_refused_without_asking_again(tmp_path):
+    g, rv = make_gate(tmp_path, verdict="block", answers=("n",))    # one answer only: a second ask would fail
+    attack = {"type": "email", "to": "drop@evil.example", "subject": "s", "body": "everything"}
+    first = g.submit({"action": attack})
+    again = g.submit({"action": dict(attack)})
+    assert first["status"] == "denied" and first["by"].startswith("human:")
+    assert again == {**again, "status": "denied", "by": "policy"} and "already refused" in again["reason"]
+    assert len(rv.prompts) == 1                                       # the retry was never reviewed
+
+
+def test_a_different_action_is_still_reviewed_and_asked(tmp_path):
+    g, rv = make_gate(tmp_path, verdict="block", answers=("n", "n"))
+    g.submit({"action": {"type": "email", "to": "a@x.example", "subject": "s", "body": "one"}})
+    res = g.submit({"action": {"type": "email", "to": "a@x.example", "subject": "s", "body": "two"}})
+    assert res["by"].startswith("human:") and len(rv.prompts) == 2
+
+
+def test_refusals_do_not_carry_into_a_new_session(tmp_path):
+    g, _ = make_gate(tmp_path, verdict="block", answers=("n",))
+    act = {"type": "email", "to": "a@x.example", "subject": "s", "body": "b"}
+    g.submit({"action": act})
+    g2, rv2 = make_gate(tmp_path, verdict="block", answers=("n",))
+    assert g2.submit({"action": act})["by"].startswith("human:") and len(rv2.prompts) == 1
+
+
+# ---- the reviewer can reason first (the setting AgentDojo measured for the 4B) ---------------
+
+def test_thinking_request_and_default():
+    off = reviewer.OllamaReviewer("nemotron-3-nano:4b").body("p")
+    on = reviewer.OllamaReviewer("nemotron-3-nano:4b", think=True).body("p")
+    assert off["think"] is False and off["format"] == "json" and off["options"]["num_predict"] == 400
+    assert on["think"] is True and "format" not in on
+    assert on["options"]["num_predict"] == reviewer.THINK_PREDICT and on["options"]["num_ctx"] == reviewer.THINK_CTX
+    assert on["messages"][0]["content"] == reviewer.SYSTEM                  # same frozen prompt
+
+
+def test_thinking_reply_is_parsed_from_its_final_answer_and_fails_closed():
+    f = lambda raw: reviewer.parse(reviewer._final_json(raw), "m", 0.0)
+    assert f('<think>maybe</think>\n```json\n{"verdict": "approve", "reason": "asked"}\n```').verdict == "approve"
+    assert f('Sure. {"verdict": "block", "reason": "new recipient"} done').verdict == "block"
+    assert f("I think it is fine.").verdict == "invalid"
+
+
+def test_policy_reads_review_think(tmp_path):
+    p = tmp_path / "policy.toml"
+    p.write_text('[review]\nmodel = "nemotron-3-nano:4b"\nthink = true\n')
+    assert Policy.load(p).review_think is True
+    p.write_text('[review]\nmodel = "nemotron-3-nano:4b"\n')
+    assert Policy.load(p).review_think is False

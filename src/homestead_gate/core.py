@@ -67,6 +67,10 @@ class Gate:
         self.policy, self.reviewer, self.approver = policy, reviewer, approver
         self.ledger_dir, self.task, self.session = Path(ledger_dir), task, session
         self.outbox, self.smtp, self.live = Path(outbox), smtp, live
+        # payload hashes refused in this session (denied, blocked or unanswered). An identical retry is
+        # refused by policy without a second review or a second question: on AgentDojo the one attack
+        # that got past the thinking 4B was the sixth identical retry of a call it had blocked five times.
+        self.refused: set[str] = set()
 
     def _log(self, action: str, summary: str, meta: dict, phase: str, target: str) -> None:
         ledger.append(action, target=target, summary=summary, meta=meta, vault=self.ledger_dir,
@@ -85,8 +89,15 @@ class Gate:
         pre("gate.request", f"request {describe(action)}", to=action.get("to"),
             read_sources=[str(r.get("source", "?")) for r in reads])
 
+        if base["payload_sha256"] in self.refused:
+            why = "the same action was already refused in this session"
+            pre("gate.decision", f"policy:deny {why}", decided_by="policy", decision="deny")
+            post("gate.denied", "not executed", reason=why)
+            return {"id": rid, "status": "denied", "by": "policy", "reason": why}
+
         outcome, why = self.policy.check(action)
         if outcome == "deny":
+            self.refused.add(base["payload_sha256"])
             pre("gate.decision", f"policy:deny {why}", decided_by="policy", decision="deny")
             post("gate.denied", "not executed", reason=why)
             return {"id": rid, "status": "denied", "by": "policy", "reason": why}
@@ -128,6 +139,7 @@ class Gate:
             pre("gate.decision", f"policy:{decision} {reason}", decided_by="policy", decision=decision)
 
         if decision != "approve":
+            self.refused.add(base["payload_sha256"])
             kind = "gate.expired" if decision == "expired" else "gate.denied"
             post(kind, "not executed", reason=reason)
             return {"id": rid, "status": "expired" if decision == "expired" else "denied",

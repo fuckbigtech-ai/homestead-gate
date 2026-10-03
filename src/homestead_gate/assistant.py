@@ -244,6 +244,9 @@ allow = ["{SAM_WALLET}"]
 
 [review]
 model = "{model}"
+# The reviewer reasons before its verdict: about 4x slower per review, far fewer false blocks
+# (AgentDojo banking: 0.54 legitimate calls blocked per run instead of 4.09). false = faster, asks more.
+think = true
 """)
     mem = AssistantMemory(d / "memory")
     src = "added by you on 2026-09-22"

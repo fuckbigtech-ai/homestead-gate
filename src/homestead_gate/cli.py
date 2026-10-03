@@ -197,7 +197,7 @@ def _serve(policy: Policy, a, task: str, smtp=None) -> int:
     ledger_dir = Path(a.ledger).expanduser()
     session = secrets.token_hex(4)
     gate = Gate(policy=policy,
-                reviewer=OllamaReviewer(policy.model, policy.ollama_url, policy.review_timeout_s),
+                reviewer=OllamaReviewer(policy.model, policy.ollama_url, policy.review_timeout_s, think=policy.review_think),
                 approver=TerminalApprover(override_delay_s=policy.override_delay_s,
                                           timeout_s=policy.approval_timeout_s),
                 ledger_dir=ledger_dir, task=task, session=session,
@@ -444,7 +444,7 @@ def _assistant_reviewer(a, policy):
     hw = hardware.detect()
     if not _fits(policy.model, hw, hardware.pick_reviewer(hw)):
         return None
-    return OllamaReviewer(policy.model, policy.ollama_url, policy.review_timeout_s)
+    return OllamaReviewer(policy.model, policy.ollama_url, policy.review_timeout_s, think=policy.review_think)
 
 
 def _offer_remember(memory, done: list[tuple[dict, dict]]) -> None:
