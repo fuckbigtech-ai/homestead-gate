@@ -8,6 +8,7 @@
   homestead-gate mcp                                           MCP tools for your agent (claude mcp add homestead-gate -- homestead-gate mcp)
   homestead-gate assistant --skill triage                      the personal assistant: cloud brain, local gate
   homestead-gate assistant --watch --every 15m                 always-on: new mail on a schedule, a brief, a notification
+  homestead-gate assistant --data DIR --imap-setup             your real inbox, read-only (then --sync, or --watch)
 """
 from __future__ import annotations
 
