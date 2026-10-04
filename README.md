@@ -14,16 +14,28 @@ yes. The cloud does the thinking. Your machine has the veto. The cloud can't vot
   in a `skills.toml` you edit. [Details](#the-assistant).
 - **Two NVIDIA open models:** Nemotron 3 Super on **Nebius Token Factory** plans and calls tools; Nemotron 3 Nano
   reviews every outbound action (4B on your machine in the product; 30B on Token Factory in the hosted demo)
-- **Measured, not claimed:** on [AgentDojo](bench/agentdojo/RESULTS.md) (ETH Zurich's benchmark for hijacked
-  agents), Nemotron 3 Super with its own safety prompt made the attacker's banking transfer in **55 of 144**
-  attacked runs (38%). With the gate (Nano 30B reviewer), **0 of 144**. Travel: 11 of 119 to 0. The cost is
-  published next to it: banking tasks finished under attack fell from 78% to 58%. The 4B reviewer on your
-  machine, thinking before it answers (the assistant's default), blocked 0.54 legitimate calls per banking run
-  (the 30B: 0.69) and let 1 of 144 through: the agent retried one attacker call until a review went its way. In
-  the product a second key (you) still stands behind the model, and once you deny an action, an identical
-  retry is refused without asking you again (not measured on AgentDojo, whose harness has no human). On travel, held out from all tuning, 0 of 106 action attacks got through. With a human in the loop, 1 of 143 banking attacks got through, not zero.
+- **Measured, not claimed** ([AgentDojo](bench/agentdojo/RESULTS.md), ETH Zurich's benchmark for hijacked
+  agents; banking suite, 144 attacked runs per setting). Nemotron 3 Super with its own safety prompt made the
+  attacker's banking transfer in **55 of 144** runs (38%) with no gate. With the reviewer deciding alone (no
+  human; the benchmark has none):
+
+  | reviewer | where it runs | attacks through | tasks finished under attack | legitimate calls blocked per run |
+  |---|---|---|---|---|
+  | Nano 30B, reasoning | hosted on Token Factory (the web demo) | **0 / 144** | 58% | 0.69 |
+  | Nano 4B, thinking on | your machine (the assistant's default) | **1 / 144** | 58% | 0.54 |
+  | Nano 4B, thinking off | your machine | 0 / 144 | 49% | 4.09 |
+
+  On travel, held out from all tuning, the 4B with thinking let 0 of 106 action attacks through. The 4B's one
+  banking miss was the agent retrying a call until one review went its way; in the product you are still the
+  second key, and an identical retry of an action you denied is refused without asking again (not measured on
+  AgentDojo). A human in the loop has been measured only with Qwen 3.5 9B as the reviewer: 1 of 143. The plain
+  gate (`homestead-gate up`) picks Qwen 3.5 9B or Nano 4B by memory, with thinking off.
 - **Receipts you can check:** every request, verdict and decision is written to a hash chain before anything
-  runs; edit one record and `homestead-gate watch` shows the line where the chain breaks.
+  runs; edit one record and `homestead-gate watch` shows the line where the chain breaks. Limit: anyone with
+  your user's access can rebuild the whole chain; export signed checkpoints off the machine
+  (`hsm checkpoint --export`) if you need evidence that survives that.
+- **v1 scope:** payments are unsigned Sepolia testnet transactions and email is a dry run unless you set up
+  live sending. No real money moves.
 
 ```bash
 git clone https://github.com/fuckbigtech-ai/homestead-gate && cd homestead-gate
@@ -298,8 +310,8 @@ machine and approval happens only in the terminal you started the gate in; there
 button on the network. The web approver lives only in `demo/web`, and a test fails if anything in
 `src/homestead_gate` can import it. GateBench numbers were measured on the local reviewers, not on
 the hosted Nano 30B. Each browser session gets its own data, memory, skills and receipts, deleted
-after an hour. Runs are rate limited (5 per page and 20 in total per hour by default; a morning run
-counts as two) with a token budget per run. Email is never sent and payments are unsigned. It is
+after an hour. Runs are rate limited (5 per page and 10 in total per hour by default; a morning run
+and a hijack run each count as two) with a token budget per run. Email is never sent and payments are unsigned. It is
 hosted on Modal with `demo/web/modal_app.py` (live at the link at the top).
 
 
@@ -473,13 +485,15 @@ homestead-gate up --live --task "..."                                           
 
 If the agent holds your email password or an API token, it can send without asking the gate. So the
 gate keeps them: the password goes into the macOS keychain (Linux: libsecret) under the gate's own
-entry, restricted to the gate's program. The agent's environment never contains it, the sandbox hides
+entry. The agent's environment never contains it, the sandbox hides
 the gate's settings file, and the password is never an argument, a log line or a receipt. The gate
 only sends as the user it protects: if the stored account isn't the policy's email, `--live` refuses
 to start. Without `--live`, approved mail still goes to a local outbox.
 
-Limits: another program running as you can still ask the keychain for the entry. macOS answers with
-a visible permission dialog rather than the password, so say no to anything that isn't the gate. A
+Limits: the gate reads the entry through `/usr/bin/security`, so macOS shows a permission dialog the
+first time; if you choose "Always Allow", any program running as you can read it without asking. On Linux,
+libsecret has no per-program restriction at all. So the agent must not run as your user unsandboxed: the
+sandbox is what keeps it away from the credential store. A
 compromised gate process has the password. Linux needs libsecret; there is no plaintext fallback.
 
 ### Web lookup of unknown recipients (optional, Tavily)

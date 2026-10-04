@@ -11,7 +11,7 @@ license = "MIT"
 requires-python = ">=3.11"
 # 0.4.0 is the first release whose ledger.append takes phase=, which is what makes a
 # record evidence that a decision came BEFORE execution rather than a note written after.
-dependencies = ["homestead-memory>=0.4.0"]
+dependencies = ["homestead-memory>=0.5.2"]   # 0.5.2: the audit-trail export
 
 [project.scripts]
 homestead-gate = "homestead_gate.cli:main"

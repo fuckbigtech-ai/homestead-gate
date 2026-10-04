@@ -6,9 +6,9 @@ without asking the gate, and the 2-of-2 is decoration. Here the password lives i
 credential store under the gate's own entry; the agent's environment never contains it and the
 sandbox hides the gate's config.
 
-  macOS  keychain item "homestead-gate-smtp", created with -T <this interpreter>, so the gate reads
-         it silently and anything else that asks (a sandboxed agent calling `security`) gets a
-         visible macOS permission dialog instead of the password.
+  macOS  keychain item "homestead-gate-smtp". Reads go through /usr/bin/security, so macOS asks the
+         first time; after "Always Allow", any program running as this user can read it. The
+         sandbox, not the keychain, is what keeps the agent away from it.
   Linux  libsecret via `secret-tool`. No plaintext fallback: without libsecret, live email is refused.
 
 Non-secret settings (host, port, user, starttls) go to ~/.homestead-gate/smtp.toml, mode 0600.
@@ -73,7 +73,8 @@ def _store_secret(service: str, user: str, label: str) -> None:
     """Have the OS store prompt the human for the secret (interactive). It never passes through here."""
     if _backend() == "keychain":
         # `-w` as the LAST argument makes `security` prompt for the password on the terminal, so it
-        # never appears in argv or the process list. -T limits silent access to this interpreter.
+        # never appears in argv or the process list. (-T names this interpreter, but reads go through
+        # /usr/bin/security, so it does not make reads silent; the sandbox is the real boundary.)
         r = subprocess.run(["security", "add-generic-password", "-U", "-s", service, "-a", user,
                             "-T", sys.executable, "-w"])
     else:
