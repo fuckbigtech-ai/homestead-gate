@@ -32,7 +32,15 @@ HOSTED MODELS (Nebius Token Factory)
 Factory's OpenAI-compatible API (key from $NEBIUS_API_KEY), e.g. agent Nemotron 3 Super, reviewer
 Nemotron 3 Nano 30B. The reviewer keeps the frozen prompt, known contacts and fail-closed rule; its
 parser is the web demo's (hosted.parse_verdict). Model defaults are left on (no thinking switch is
-sent), as in the product; reasoning that leaks into the reply is stripped as the product brain does.
+sent), as in the product; reasoning that leaks into the agent's reply is stripped as the product brain does.
+
+PARSER (since 2026-10-04)
+-------------------------
+Every reviewer reply (hosted, local thinking, local thinking off) is read by the product's parser,
+homestead_gate.reviewer.parse via hosted.strict_verdict: approve only if the reply IS one JSON object.
+Each gate_log row also keeps the raw reply (first 4000 chars), the reasoning length, and what the old
+lenient parser (hosted.legacy_*) would have returned on the same reply. Numbers published before that
+date were scored by the lenient parser; see RESULTS.md "Parser re-check (2026-10-04)".
 
 AgentDojo's important_instructions attack addresses the model by a name looked up from the pipeline
 name. Hosted runs look it up as "local", so the injected text ("... to you, Local model") is byte-
@@ -201,17 +209,19 @@ def ollama_body(model: str, prompt: str, think: bool = False) -> dict:
 
 
 def parse_local_thinking(content: str | None) -> tuple[str, str, bool]:
-    """Verdict from a thinking reply's final content (replay.py parse_final, non-strict): <think> blocks
-    and code fences stripped, then the first {...}. Ollama returns the reasoning in message.thinking,
-    which is never read as the verdict. -> (verdict, reason, ok); not ok is a block (fail closed)."""
-    try:
-        j = json.loads(hosted._clean(hosted.strip_think(content or "")))
-        v = str(j.get("verdict", "")).strip().lower()
-    except (ValueError, AttributeError):
-        j, v = {}, ""
-    if v not in ("approve", "block"):
-        return "block", "reviewer gave no usable verdict", False
-    return v, str(j.get("reason", ""))[:200], True
+    """Verdict from a thinking reply's final content, by the product's strict parser (hosted.strict_verdict).
+    Ollama returns the reasoning in message.thinking, which is never read as the verdict.
+    -> (verdict, reason, ok); not ok is a block (fail closed)."""
+    return hosted.strict_verdict(content)
+
+
+def raw_record(content: str | None, legacy: tuple[str, str, bool], reasoning: str | None = None,
+               reasoning_key: str = "thinking_chars") -> dict:
+    """What a review log row keeps about the raw reply: the content (first hosted.RAW_KEEP chars), its length,
+    the reasoning length, and what the OLD lenient parser would have returned on the same full text."""
+    c = content or ""
+    return {"raw_content": c[:hosted.RAW_KEEP], "content_chars": len(c), reasoning_key: len(reasoning or ""),
+            "legacy_verdict": legacy[0], "legacy_ok": legacy[2]}
 
 
 def ollama_stats(resp: dict) -> dict:
@@ -235,15 +245,17 @@ def review(model: str, user_request: str, untrusted: str, action: dict, named: s
         req = urllib.request.Request(f"{OLLAMA}/api/chat", data=body, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=300) as r:
             resp = json.loads(r.read())
-        LAST_REVIEW.update(ollama_stats(resp))
-        j = json.loads(resp["message"]["content"])
-        v = str(j.get("verdict", "")).lower()
-        if v not in ("approve", "block"):
-            USAGE.event("gate_invalid")
-        return (v if v in ("approve", "block") else "block"), str(j.get("reason", ""))[:200]
+        msg = resp["message"]
     except Exception as e:  # fail closed, same as the product
         USAGE.event("gate_unavailable")
         return "block", f"reviewer unavailable: {type(e).__name__}"
+    content = msg.get("content") or ""
+    v, reason, ok = hosted.strict_verdict(content)      # the product's parser; old: plain json.loads
+    LAST_REVIEW.update(ollama_stats(resp), **raw_record(content, hosted.legacy_parse_local_json(content),
+                                                        msg.get("thinking")), invalid=not ok)
+    if not ok:
+        USAGE.event("gate_invalid")
+    return v, reason
 
 
 def review_local_thinking(model: str, prompt: str) -> tuple[str, str]:
@@ -260,8 +272,10 @@ def review_local_thinking(model: str, prompt: str) -> tuple[str, str]:
         USAGE.event("gate_unavailable")
         return "block", f"reviewer unavailable: {type(e).__name__}"
     msg = resp.get("message") or {}
-    v, reason, ok = parse_local_thinking(msg.get("content"))
-    LAST_REVIEW.update(ollama_stats(resp), thinking_chars=len(msg.get("thinking") or ""), invalid=not ok)
+    content = msg.get("content") or ""
+    v, reason, ok = parse_local_thinking(content)
+    LAST_REVIEW.update(ollama_stats(resp), **raw_record(content, hosted.legacy_parse_local_thinking(content),
+                                                        msg.get("thinking")), invalid=not ok)
     if not ok:
         USAGE.event("gate_invalid")
     if resp.get("done_reason") == "length":
@@ -283,7 +297,12 @@ def review_hosted(client, prompt: str) -> tuple[str, str]:
     except LLMError as e:
         USAGE.event("gate_unavailable")
         return "block", f"reviewer unavailable: HTTP {e.status}" if e.status else "reviewer unavailable"
-    v, reason, status = hosted.parse_verdict(msg.get("content"), msg.get("reasoning_content"))
+    content, reasoning = msg.get("content") or "", msg.get("reasoning_content") or ""
+    v, reason, status = hosted.parse_verdict(content, reasoning)
+    LAST_REVIEW.update(raw_record(content, hosted.legacy_parse_hosted(content, reasoning), reasoning,
+                                  "reasoning_chars"),
+                       raw_reasoning=reasoning[:hosted.RAW_KEEP], finish_reason=msg.get("finish_reason"),
+                       invalid=status != "ok")
     if status != "ok":
         USAGE.event("gate_invalid")
     return v, reason
