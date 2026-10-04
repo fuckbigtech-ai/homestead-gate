@@ -4,11 +4,16 @@ Stdlib only, so the tests run without AgentDojo or the openai package installed.
 
   guard_sentence()   the product brain's safety sentence (SYSTEM_GUARD in assistant.py), read from
                      the source file so it is never copied by hand
-  parse_verdict()    the hosted reviewer's parser: the same steps as the web demo's
-                     TokenFactoryReviewer (strip <think>, strip code fences, first JSON object, fall
-                     back to reasoning_content when content is empty), then the product's rule:
-                     anything but a clear approve/block is not a usable verdict, and the gate
-                     treats it as a block (fail closed)
+  strict_verdict()   the verdict in one reviewer reply, by the PRODUCT's parser
+                     (homestead_gate.reviewer.parse): approve only when the reply, after closed
+                     <think> blocks and one code fence are removed, IS one JSON object without
+                     duplicate keys; an object pulled out of prose can only block; anything else is
+                     invalid, which the gate treats as a block (fail closed). Every bench reviewer
+                     path (hosted, local thinking, local non-thinking) uses it.
+  parse_verdict()    the hosted reviewer: the web demo's TokenFactoryReviewer steps (fall back to
+                     reasoning_content only when content is empty), then strict_verdict()
+  legacy_*()         the bench's OLD lenient parsers, frozen verbatim. Used ONLY to record what they
+                     would have said about the same reply (gate_log / replay rows), never as a verdict.
   Usage              per-lane token and cost counter, written to a JSON file after every call so a
                      running job can be costed from outside, with a hard cost cap that stops the lane
 
@@ -21,8 +26,12 @@ import ast
 import json
 import os
 import re
+import sys
 import threading
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+from homestead_gate.reviewer import parse as _product_parse  # noqa: E402  (stdlib only)
 
 TF_BASE_URL = "https://api.tokenfactory.nebius.com/v1"
 TF_KEY_ENV = "NEBIUS_API_KEY"
@@ -67,7 +76,34 @@ def strip_think(text: str | None) -> str:
     return t.strip()
 
 
-def _clean(text: str) -> str:
+RAW_KEEP = 4000          # chars of each raw reviewer reply kept in gate_log / replay rows
+
+
+def strict_verdict(raw: str | None) -> tuple[str, str, bool]:
+    """-> (verdict, reason, ok) by the product's parser. Not ok = invalid, returned as a block."""
+    v = _product_parse(raw or "", "", 0.0)
+    if v.verdict not in ("approve", "block"):
+        return "block", v.reason or "reviewer gave no usable verdict", False
+    return v.verdict, v.reason[:200], True
+
+
+def parse_verdict(content: str | None, reasoning: str | None = None) -> tuple[str, str, str]:
+    """Hosted reply -> (verdict, reason, status). verdict is approve or block; status is "ok" or "invalid"
+    (no usable verdict, returned as a block: fail closed). Same steps as the web demo's TokenFactoryReviewer:
+    reasoning_content is read only when content is empty (being prose, it can then at most block), then the
+    product's strict parser."""
+    raw = content or ""
+    if not raw.strip() and reasoning:
+        raw = reasoning
+    v, why, ok = strict_verdict(raw)
+    return v, why, "ok" if ok else "invalid"
+
+
+# --- The OLD lenient parsers, frozen verbatim for comparison only (the bench before 2026-10-04) --------
+# They scored the published hosted Nano 30B and Nano 4B-with-thinking numbers. The greedy first-{...}
+# extraction can pick a quoted {"verdict": "approve"} out of prose. Never use them as a verdict.
+
+def _legacy_clean(text: str) -> str:
     text = _THINK.sub("", text or "").strip()
     text = _FENCE.sub("", text).strip()
     if not text.startswith("{"):
@@ -76,20 +112,43 @@ def _clean(text: str) -> str:
     return text
 
 
-def parse_verdict(content: str | None, reasoning: str | None = None) -> tuple[str, str, str]:
-    """-> (verdict, reason, status). verdict is approve or block; status is "ok" or "invalid".
-    invalid means no usable verdict and is returned as a block (fail closed)."""
+def legacy_parse_hosted(content: str | None, reasoning: str | None = None) -> tuple[str, str, bool]:
+    """Old hosted.parse_verdict (run_gate.review_hosted, replay.py --backend tokenfactory)."""
     raw = content or ""
     if not raw.strip() and reasoning:
         raw = reasoning
     try:
-        j = json.loads(_clean(raw))
+        j = json.loads(_legacy_clean(raw))
         v = str(j.get("verdict", "")).strip().lower()
     except (ValueError, AttributeError):
         j, v = {}, ""
     if v not in ("approve", "block"):
-        return "block", "reviewer gave no usable verdict", "invalid"
-    return v, str(j.get("reason", ""))[:200], "ok"
+        return "block", "reviewer gave no usable verdict", False
+    return v, str(j.get("reason", ""))[:200], True
+
+
+def legacy_parse_local_thinking(content: str | None) -> tuple[str, str, bool]:
+    """Old run_gate.parse_local_thinking = replay.parse_final(strict=False) (--gate-think, replay mode "on")."""
+    try:
+        j = json.loads(_legacy_clean(strip_think(content or "")))
+        v = str(j.get("verdict", "")).strip().lower()
+    except (ValueError, AttributeError):
+        j, v = {}, ""
+    if v not in ("approve", "block"):
+        return "block", "reviewer gave no usable verdict", False
+    return v, str(j.get("reason", ""))[:200], True
+
+
+def legacy_parse_local_json(content: str | None) -> tuple[str, str, bool]:
+    """Old run_gate.review default path = replay.parse_final(strict=True) (format json, thinking off)."""
+    try:
+        j = json.loads(content or "")
+        v = str(j.get("verdict", "")).lower()
+    except (ValueError, AttributeError):
+        j, v = {}, ""
+    if v not in ("approve", "block"):
+        return "block", "reviewer gave no usable verdict", False
+    return v, str(j.get("reason", ""))[:200], True
 
 
 class CostCapExceeded(RuntimeError):

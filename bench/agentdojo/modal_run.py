@@ -49,7 +49,8 @@ nemo_image = (modal.Image.debian_slim(python_version="3.12")
               .add_local_file(HERE / "hosted.py", "/root/bench/agentdojo/hosted.py")
               .add_local_file(SRC / "__init__.py", "/root/src/homestead_gate/__init__.py")
               .add_local_file(SRC / "llm.py", "/root/src/homestead_gate/llm.py")
-              .add_local_file(SRC / "assistant.py", "/root/src/homestead_gate/assistant.py"))   # read for SYSTEM_GUARD only
+              .add_local_file(SRC / "assistant.py", "/root/src/homestead_gate/assistant.py")    # read for SYSTEM_GUARD only
+              .add_local_file(SRC / "reviewer.py", "/root/src/homestead_gate/reviewer.py"))     # the product's verdict parser
 SUPER, NANO = "nvidia/nemotron-3-super-120b-a12b", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"
 NEMO_COMMON = ["--agent", SUPER, "--agent-backend", "tokenfactory", "--agent-system", "guard", "--skip-selfcheck"]
 NEMO_SETTINGS = {"nogate": [], "gate": ["--gate", NANO, "--gate-backend", "tokenfactory", "--human", "none"]}
@@ -155,7 +156,8 @@ local_image = (modal.Image.debian_slim(python_version="3.12")
                .add_local_file(HERE / "hosted.py", "/root/bench/agentdojo/hosted.py")
                .add_local_file(SRC / "__init__.py", "/root/src/homestead_gate/__init__.py")
                .add_local_file(SRC / "llm.py", "/root/src/homestead_gate/llm.py")
-               .add_local_file(SRC / "assistant.py", "/root/src/homestead_gate/assistant.py"))
+               .add_local_file(SRC / "assistant.py", "/root/src/homestead_gate/assistant.py")
+               .add_local_file(SRC / "reviewer.py", "/root/src/homestead_gate/reviewer.py"))
 LOCAL_LANES = 8
 
 
@@ -252,7 +254,9 @@ def replay(prompts: list[str]) -> dict:
 
 
 NANO4B_GGUF, NANO4B = "hf.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M", "nemotron-3-nano:4b"
-items_image = image.add_local_file(HERE / "hosted.py", "/root/bench/agentdojo/hosted.py")
+items_image = (image.add_local_file(HERE / "hosted.py", "/root/bench/agentdojo/hosted.py")
+               .add_local_file(SRC / "__init__.py", "/root/src/homestead_gate/__init__.py")
+               .add_local_file(SRC / "reviewer.py", "/root/src/homestead_gate/reviewer.py"))   # hosted imports the product parser
 
 
 @app.function(gpu="L4", timeout=40 * 60, image=items_image)
@@ -300,7 +304,7 @@ THINK_MODELS = {"4b": (NANO4B_GGUF, NANO4B, "be5d9a656a51"),
 THINK_TIMEOUT_MIN = {"4b": 70, "30b": 45}       # the hard GPU-spend stop: L4 ~$0.93, L40S ~$1.46 at list price
 
 
-def _replay_think(items: list, which: str, modes: list[str], probe: int, gpu: str) -> dict:
+def _replay_think(items: list, which: str, modes: list[str], probe: int, gpu: str, subdir: str = "replay_think") -> dict:
     import os, subprocess, time, urllib.request
     t0 = time.time()
     pull, name, blob = THINK_MODELS[which]
@@ -334,7 +338,7 @@ def _replay_think(items: list, which: str, modes: list[str], probe: int, gpu: st
     meta["ps"] = sh("ollama ps")
     print(json.dumps({k: v for k, v in meta.items() if k not in ("modelfile",)}, indent=1), flush=True)
     Path("/tmp/items.json").write_text(json.dumps(items))
-    dest = f"/results/replay_think/{'probe_' if probe else ''}{which}.json"
+    dest = f"/results/{subdir}/{'probe_' if probe else ''}{which}.json"
     Path(dest).parent.mkdir(parents=True, exist_ok=True)
     left = THINK_TIMEOUT_MIN[which] - (time.time() - t0) / 60 - 6      # leave time to return the rows
     cmd = ["python", "/root/bench/agentdojo/replay.py", "--items", "/tmp/items.json", "--prompt", "v1", "--model", name,
@@ -351,18 +355,18 @@ def _replay_think(items: list, which: str, modes: list[str], probe: int, gpu: st
     print(log[-2500:], flush=True)
     rows = json.loads(Path(dest).read_text()) if Path(dest).exists() else None
     return {"which": which, "meta": meta, "rows": rows, "error": None if p.returncode == 0 else log[-3000:],
-            "log_tail": log[-1500:], "ollama_log_tail": Path("/tmp/ollama.log").read_text(errors="replace")[-3000:],
+            "log_tail": log[-3000:], "ollama_log_tail": Path("/tmp/ollama.log").read_text(errors="replace")[-3000:],
             "setup_min": round((t1 - t0) / 60, 2), "total_min": round((time.time() - t0) / 60, 2)}
 
 
 @app.function(gpu="L4", timeout=THINK_TIMEOUT_MIN["4b"] * 60, image=items_image, volumes={"/results": vol})
-def replay_think_l4(items: list, which: str, modes: list[str], probe: int = 0) -> dict:
-    return _replay_think(items, which, modes, probe, "L4")
+def replay_think_l4(items: list, which: str, modes: list[str], probe: int = 0, subdir: str = "replay_think") -> dict:
+    return _replay_think(items, which, modes, probe, "L4", subdir)
 
 
 @app.function(gpu="L40S", timeout=THINK_TIMEOUT_MIN["30b"] * 60, image=items_image, volumes={"/results": vol})
-def replay_think_l40s(items: list, which: str, modes: list[str], probe: int = 0) -> dict:
-    return _replay_think(items, which, modes, probe, "L40S")
+def replay_think_l40s(items: list, which: str, modes: list[str], probe: int = 0, subdir: str = "replay_think") -> dict:
+    return _replay_think(items, which, modes, probe, "L40S", subdir)
 
 
 @app.function(gpu="L4", timeout=3 * 3600)
@@ -510,7 +514,7 @@ def main(suite: str = "workspace", chunks: int = 4, smoke: bool = False, replay_
          gatebench_prompts: str = "", settings: str = "", split: str = "test", nemotron: bool = False,
          lanes: int = 4, cost_cap: float = 1.2, tasks: str = "", prefix: str = "nemotron", replay_items_file: str = "",
          replay_out: str = "", local_gate: str = "", total_cap: float = 3.6, replay_think: str = "",
-         think_modes: str = "off,on", probe: int = 0, local4b: str = ""):
+         think_modes: str = "off,on", probe: int = 0, local4b: str = "", replay_subdir: str = "replay_think"):
     if local4b:
         # --local4b think | off | think,off  (--smoke: prefixes get _smoke, 25-min timeout; --tasks restricts)
         n = {"workspace": 40, "travel": 20, "banking": 16, "slack": 21}[suite]
@@ -526,7 +530,7 @@ def main(suite: str = "workspace", chunks: int = 4, smoke: bool = False, replay_
         out.mkdir(parents=True, exist_ok=True)
         modes = ("on,on-json,template" if probe else think_modes).split(",")
         fns = {"4b": replay_think_l4, "30b": replay_think_l40s}
-        calls = [(w, fns[w].spawn(its, w, modes, probe)) for w in replay_think.split(",")]
+        calls = [(w, fns[w].spawn(its, w, modes, probe, replay_subdir)) for w in replay_think.split(",")]
         for w, c in calls:
             try:
                 res = c.get()

@@ -622,6 +622,90 @@ Traces: Modal volume `agentdojo-results`, prefixes `nano4b_think/banking`, `nano
 (the thinking-off control). Each has `env.json` (Ollama version, GPU, blobs, caps) and per-lane `gate_log.jsonl`,
 which carries run ids, call args, an attacker flag and Ollama timings per review.
 
+### Parser re-check (2026-10-04)
+
+A code review found that the bench read thinking-mode reviewer replies leniently. It took the first `{...}` in the
+text (greedy), kept text after an unclosed `<think>`, and let a duplicate key win. A reply that quoted the poisoned
+email's own `{"verdict": "approve"}` could therefore count as an approval. The product's parser
+(`homestead_gate.reviewer.parse`, commit `a575e9a`) is strict. It approves only when the whole reply, after closed
+`<think>` blocks and one code fence are removed, is a single JSON object with no duplicate keys. An object pulled
+out of prose can only block.
+
+The lenient parser scored these published numbers:
+- the hosted Nano 30B rows (full banking and travel runs, and its replay)
+- the Nano 4B with thinking (replay, and full banking and travel runs)
+- the local Nano 30B thinking replay
+
+The thinking-off rows already used plain `json.loads`. Raw replies were not saved then, so we re-ran the replay.
+
+**What changed in the bench (commit `58a8afb`, hosted reasoning logging fixed after this replay).** Every reviewer
+reply now goes through the product's parser: hosted, local with thinking, and local without (`hosted.strict_verdict`).
+The old parsers are kept verbatim as `hosted.legacy_*`. They are used only to record what they would have said.
+Every `gate_log.jsonl` and replay row now keeps:
+- the raw reply (first 4000 characters) and its length
+- the reasoning length: Ollama's `message.thinking`; for hosted, Token Factory's `message.reasoning` plus its first
+  4000 characters
+- the old parser's verdict on the same full reply
+
+**The replay.** Same 137 items as before (92 legitimate: 10 clean, 82 attacked; 45 attacker calls), prompt v1. Each
+reply was parsed both ways in the same process:
+
+    modal run bench/agentdojo/modal_run.py --replay-items-file items.json --replay-think 4b --think-modes on \
+        --replay-subdir replay_think_strict
+    replay.py --items items.json --prompt v1 --backend tokenfactory --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B
+
+| reviewer | legit approved, strict | old parser, same replies | attacker blocked, strict | old parser, same replies | verdicts that differ (legit / attacker) | published replay |
+|---|---|---|---|---|---|---|
+| Nano 4B local Q4, thinking on (L4, blob `be5d9a656a51…`, Ollama 0.35.0) | 65/92 (7/10 clean, 58/82 attacked) | 65/92 | 44/45 | 44/45 | **0 / 0** | 65/92, 44/45 |
+| Nano 30B hosted (Token Factory) | 49/92 (5/10, 44/82) | 49/92 | 45/45 | 45/45 | **0 / 0** | 54/92, 45/45 |
+
+No reply changed status either. Invalid replies were 0 (4B) and 6 (30B) under both parsers. The 6 hosted invalids
+were replies cut off at the 2048-token cap with empty content.
+
+Why nothing changed: every reply was already a bare JSON object.
+- 4B: all 137 final contents were bare JSON (at most 331 characters), with no `<think>` in the content. Ollama sent
+  the reasoning separately (median 1,271 characters in `message.thinking`), and neither parser reads it.
+- Hosted 30B: all 131 replies that finished were bare JSON. Token Factory sends the reasoning as `message.reasoning`,
+  not `reasoning_content`, so the reasoning fallback (both parsers, and the web demo) never ran. That includes the 6
+  cut-off replies, which therefore stay invalid. This replay's hosted rows log reasoning length 0, because they were
+  written before the logging read `message.reasoning`. Completion tokens averaged about 900 per review.
+
+None of the lenient parser's failure cases (prose around the JSON, a leftover `<think>`, duplicate keys) occurred.
+
+**The same check on the published rows.** The published `replay_think/4b.json` and `30b.json` rows kept the first
+300 characters of each reply. For every row whose reply fit in 300 characters (132 of 137 for the 4B with thinking,
+all 137 for the local 30B), the old parser on that text gives the published verdict, and the strict parser gives
+the same approve or not-approve result. The rows that did not fit were all published blocks. A strict approval
+always implies an old-parser approval (tested), so none of those rows can flip either. So the published 4B (65/92,
+44/45) and local 30B (60/92, 45/45) thinking replays are unchanged under the strict parser, row for row.
+
+The other differences from the published replay are sampling. The hosted 30B approved 49/92 legitimate calls
+today against 54/92 then, on identical prompts, under both parsers. Token Factory at temperature 0 is not
+deterministic (see the caveats above). The parser does not explain the gap.
+
+**Do the published full-run numbers stand? Yes, very likely.** This rests on three points:
+- On identical replies, the strict and lenient parsers differed on 0 of 274 reviews here and on 0 of the published
+  replay rows checked.
+- Neither model put prose or `<think>` text into the reply content these parsers read.
+- Strict parsing can only turn an approval into a block, never the reverse. So if a full run did contain a
+  lenient-only approval, the published attack-success numbers could only go down. Only the legit-approval and
+  utility figures could be overstated.
+
+The limit is sampling. The 137 items are first blocks from the 4B's banking runs, while the full runs made about
+713 (4B banking), 89 (4B travel), about 790 (30B banking) and 76 (30B travel) reviews. With 0 differences in 137
+reviews per reviewer, the 95% upper bound on the per-review difference rate is about 2.2%.
+
+No full run was re-run. If the owner wants certainty, it costs about what the runs cost at the time:
+- hosted 30B, banking and travel: about $8 of Token Factory and $0.3 of Modal
+- 4B with thinking, banking and travel: about $3.8 of Token Factory and $1.5 of Modal
+
+From now on, every run's `gate_log.jsonl` carries `legacy_verdict` next to the verdict, so any difference shows up
+without a re-run.
+
+Cost of this check: Modal L4 19.4 container-minutes (about $0.26 at list price, an estimate from minutes); Token
+Factory $0.039 (lane counter). Rows: `agentdojo-results/replay_think_strict/4b.json` and `replay_think_strict/hosted30b.json` (Modal volume),
+both with `raw_content` and `legacy_verdict` per review. The 4B rows also carry the thinking length.
+
 ### Published attacks that got past Nemotron 3 Super (no gate)
 
 Every attack below is AgentDojo's `important_instructions` template (unchanged, quoted in AgentDojo's
