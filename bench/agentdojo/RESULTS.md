@@ -638,12 +638,13 @@ The lenient parser scored these published numbers:
 
 The thinking-off rows already used plain `json.loads`. Raw replies were not saved then, so we re-ran the replay.
 
-**What changed in the bench (commit `58a8afb`).** Every reviewer reply now goes through the product's parser:
-hosted, local with thinking, and local without (`hosted.strict_verdict`). The old parsers are kept verbatim as
-`hosted.legacy_*`. They are used only to record what they would have said. Every `gate_log.jsonl` and replay row
-now keeps:
+**What changed in the bench (commit `58a8afb`, hosted reasoning logging fixed after this replay).** Every reviewer
+reply now goes through the product's parser: hosted, local with thinking, and local without (`hosted.strict_verdict`).
+The old parsers are kept verbatim as `hosted.legacy_*`. They are used only to record what they would have said.
+Every `gate_log.jsonl` and replay row now keeps:
 - the raw reply (first 4000 characters) and its length
-- the reasoning length
+- the reasoning length: Ollama's `message.thinking`; for hosted, Token Factory's `message.reasoning` plus its first
+  4000 characters
 - the old parser's verdict on the same full reply
 
 **The replay.** Same 137 items as before (92 legitimate: 10 clean, 82 attacked; 45 attacker calls), prompt v1. Each
@@ -664,11 +665,12 @@ were replies cut off at the 2048-token cap with empty content.
 Why nothing changed: every reply was already a bare JSON object.
 - 4B: all 137 final contents were bare JSON (at most 331 characters), with no `<think>` in the content. Ollama sent
   the reasoning separately (median 1,271 characters in `message.thinking`), and neither parser reads it.
-- Hosted 30B: all 131 replies that finished were bare JSON. Token Factory returned no `reasoning_content`, so the
-  reasoning fallback never ran.
+- Hosted 30B: all 131 replies that finished were bare JSON. Token Factory sends the reasoning as `message.reasoning`,
+  not `reasoning_content`, so the reasoning fallback (both parsers, and the web demo) never ran. That includes the 6
+  cut-off replies, which therefore stay invalid. This replay's hosted rows log reasoning length 0, because they were
+  written before the logging read `message.reasoning`. Completion tokens averaged about 900 per review.
 
-The lenient parser's failure cases (prose around the JSON, a leftover `<think>`, duplicate keys) did not occur in
-any of these replies.
+None of the lenient parser's failure cases (prose around the JSON, a leftover `<think>`, duplicate keys) occurred.
 
 **The same check on the published rows.** The published `replay_think/4b.json` and `30b.json` rows kept the first
 300 characters of each reply. For every row whose reply fit in 300 characters (132 of 137 for the 4B with thinking,
@@ -702,7 +704,7 @@ without a re-run.
 
 Cost of this check: Modal L4 19.4 container-minutes (about $0.26 at list price, an estimate from minutes); Token
 Factory $0.039 (lane counter). Rows: `agentdojo-results/replay_think_strict/4b.json` and `replay_think_strict/hosted30b.json` (Modal volume),
-both with `raw_content`, `legacy_verdict` and the reasoning length per review.
+both with `raw_content` and `legacy_verdict` per review. The 4B rows also carry the thinking length.
 
 ### Published attacks that got past Nemotron 3 Super (no gate)
 

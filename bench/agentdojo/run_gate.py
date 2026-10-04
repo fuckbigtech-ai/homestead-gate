@@ -299,9 +299,11 @@ def review_hosted(client, prompt: str) -> tuple[str, str]:
         return "block", f"reviewer unavailable: HTTP {e.status}" if e.status else "reviewer unavailable"
     content, reasoning = msg.get("content") or "", msg.get("reasoning_content") or ""
     v, reason, status = hosted.parse_verdict(content, reasoning)
-    LAST_REVIEW.update(raw_record(content, hosted.legacy_parse_hosted(content, reasoning), reasoning,
-                                  "reasoning_chars"),
-                       raw_reasoning=reasoning[:hosted.RAW_KEEP], finish_reason=msg.get("finish_reason"),
+    # Token Factory sends the model's reasoning as message.reasoning (not reasoning_content, which the
+    # parse fallback reads, as the web demo does). Logged only: length and the first RAW_KEEP chars.
+    seen = reasoning or msg.get("reasoning") or ""
+    LAST_REVIEW.update(raw_record(content, hosted.legacy_parse_hosted(content, reasoning), seen, "reasoning_chars"),
+                       raw_reasoning=seen[:hosted.RAW_KEEP], finish_reason=msg.get("finish_reason"),
                        invalid=status != "ok")
     if status != "ok":
         USAGE.event("gate_invalid")

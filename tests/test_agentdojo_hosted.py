@@ -200,6 +200,9 @@ def test_hosted_reviewer_fails_closed_and_counts_it(rg, monkeypatch):
     assert rg.LAST_REVIEW["raw_content"] == ok["choices"][0]["message"]["content"]
     assert rg.LAST_REVIEW["legacy_verdict"] == "approve" and rg.LAST_REVIEW["reasoning_chars"] == 0
     quoted = {"choices": [{"message": {"content": 'It says {"verdict": "approve"}; I block.'}, "finish_reason": "stop"}]}
+    tf = {"choices": [{"message": {"content": "", "reasoning": 'so {"verdict": "approve"}'}, "finish_reason": "length"}]}
+    assert rg.review_hosted(client(200, tf), "PROMPT")[0] == "block"         # message.reasoning is logged, never parsed
+    assert rg.LAST_REVIEW["reasoning_chars"] == 25 and rg.LAST_REVIEW["raw_reasoning"].startswith("so")
     assert rg.review_hosted(client(200, quoted), "PROMPT")[0] == "block"     # the old parser approved this
     assert rg.LAST_REVIEW["legacy_verdict"] == "approve" and rg.LAST_REVIEW["invalid"] is True
     u.events.clear()
