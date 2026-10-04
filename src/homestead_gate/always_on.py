@@ -19,7 +19,10 @@ One pass:
   5. Mark the new mail handled (only when the run finished) and write brief.md plus a dated copy
      under briefs/. The "done" and "waiting for you" lists are built here, from the gate's
      results and the refusals, not from the model's summary; its words are quoted separately.
-  6. Show a desktop notification with counts only (no email text): osascript on macOS,
+  6. Write a signed checkpoint of the receipts and anchor it (receipts.py; policy [receipts]).
+     A checkpoint the gate refuses to sign (the chain no longer matches an earlier one) is in
+     the brief and the notification, not only in a log.
+  7. Show a desktop notification with counts only (no email text): osascript on macOS,
      notify-send on Linux, nothing if neither exists.
 
 A lock file stops two passes (cron plus a manual run) from overlapping.
@@ -38,7 +41,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import assistant as asst
-from . import mailbox
+from . import mailbox, receipts
 from .approval import HumanDecision
 from .core import Gate
 from .llm import LLMError
@@ -105,7 +108,7 @@ def save_pending(data: Path, items: list[dict]) -> None:
 
 
 def resolve_pending(data: Path, *, policy_factory: Callable[[], object], reviewer, approver,
-                    log: Callable[[str], None] = print) -> list[dict]:
+                    log: Callable[[str], None] = print, mac_key: bytes | None = None) -> list[dict]:
     """Put each held item through the full gate again (policy, reviewer, the terminal approver).
     Items the human answered leave the queue; an unanswered one stays. Returns
     [{"item", "result"}]."""
@@ -123,7 +126,8 @@ def resolve_pending(data: Path, *, policy_factory: Callable[[], object], reviewe
         policy = policy_factory()
         asst.replay_auto_spend(policy, data / "ledger")
         gate = Gate(policy=policy, reviewer=reviewer, approver=approver, ledger_dir=data / "ledger",
-                    task=str(item.get("task", "")), session=secrets.token_hex(4), outbox=data / "outbox")
+                    task=str(item.get("task", "")), session=secrets.token_hex(4), outbox=data / "outbox",
+                    mac_key=mac_key)
         log(f"held {item.get('created', '?')} by skill {item.get('skill', '?')}: "
             f"{_what(item.get('action') or {})}")
         res = gate.submit({"action": item.get("action") or {}, "read": item.get("reads") or []})
@@ -170,6 +174,8 @@ class Pass:
     skipped: str | None = None
     sync: str | None = None          # what the mail sync did, or why it could not
     sync_failed: bool = False
+    receipts: str | None = None      # what the checkpoint did; set when it was refused or unsigned
+    receipts_refused: bool = False
     brief: str = ""
     brief_path: str = ""
 
@@ -197,10 +203,11 @@ class _Lock:
 def run_pass(data: Path, skill: Skill, *, llm, reviewer, now: datetime | None = None,
              notify_fn: Callable[[str, str], bool] | None = None, log: Callable[[str], None] = print,
              guard_prompt: bool = True, max_steps: int = 12, make_bot=None, wrap_submit=None,
-             sync: Callable[[], "mailbox.SyncResult"] | None = None) -> Pass:
+             sync: Callable[[], "mailbox.SyncResult"] | None = None, seal: bool = True) -> Pass:
     """One scheduled pass over the new mail. make_bot and wrap_submit let a caller watch the run
     (the web demo uses them to show each step); they cannot change who approves. sync, when given,
-    fetches real mail into inbox.json first, under the same lock."""
+    fetches real mail into inbox.json first, under the same lock. seal=False skips the receipt key
+    and checkpoint (the web demo's throwaway sessions)."""
     data = Path(data)
     now = now or datetime.now()
     p = Pass(at=now.strftime("%Y-%m-%d %H:%M"), skill=skill.name, instruction=skill.instruction)
@@ -220,12 +227,15 @@ def run_pass(data: Path, skill: Skill, *, llm, reviewer, now: datetime | None = 
         p.earlier_waiting = len(load_pending(data))
         memory = asst.AssistantMemory(data / "memory")
         names = {addr: f["entity"] for addr, f in memory.contacts().items()}
+        keys = receipts.ledger_keys(warn=log) if seal else None
         if p.new_mail:
             out = _run(data, skill, p, state, llm=llm, reviewer=reviewer, memory=memory, names=names,
                        guard_prompt=guard_prompt, max_steps=max_steps, make_bot=make_bot,
-                       wrap_submit=wrap_submit, log=log)
+                       wrap_submit=wrap_submit, log=log, mac_key=keys.mac_key if keys else None)
             if out is not None:
                 state["seen"] = sorted(set(state.get("seen") or []) | {m["id"] for m in p.new_mail})
+        if seal:
+            _seal(data, p, memory, reviewer, keys, log)
         state["last_run"] = now.isoformat(timespec="seconds")
         state["runs"] = int(state.get("runs") or 0) + 1
         save_state(data, state)
@@ -235,17 +245,31 @@ def run_pass(data: Path, skill: Skill, *, llm, reviewer, now: datetime | None = 
         dated = data / BRIEFS_DIR / f"{now.strftime('%Y-%m-%d-%H%M%S')}.md"
         dated.write_text(p.brief)
         p.brief_path = str(data / BRIEF_FILE)
-    if p.new_mail or p.error or p.sync_failed:
+    if p.new_mail or p.error or p.sync_failed or p.receipts_refused:
         (notify_fn or notify)("homestead", _counts(p))      # looked up now, so it can be replaced
     return p
 
 
+def _seal(data: Path, p: Pass, memory, reviewer, keys, log) -> None:
+    try:
+        policy = asst.load_policy(data, memory)
+    except (OSError, ValueError):
+        policy = None                        # no anchors without a readable policy; still checkpoint locally
+    r = receipts.seal(data / "ledger", policy=policy, reason="scheduled-pass", keys=keys, log=log,
+                      reviewer_model=getattr(reviewer, "model", None) or (policy.model if policy else None))
+    if r.status == "refused":
+        p.receipts_refused = True
+        p.receipts = "the gate REFUSED to sign a checkpoint: " + "; ".join(r.problems)
+    elif r.warnings:
+        p.receipts = "; ".join(r.warnings)
+
+
 def _run(data, skill, p: Pass, state, *, llm, reviewer, memory, names, guard_prompt, max_steps,
-         make_bot, wrap_submit, log):
+         make_bot, wrap_submit, log, mac_key=None):
     policy = asst.load_policy(data, memory)
     asst.replay_auto_spend(policy, data / "ledger")
     gate = Gate(policy=policy, reviewer=reviewer, approver=HoldApprover(), ledger_dir=data / "ledger",
-                task=skill.instruction, session=secrets.token_hex(4), outbox=data / "outbox")
+                task=skill.instruction, session=secrets.token_hex(4), outbox=data / "outbox", mac_key=mac_key)
 
     def submit(request: dict) -> dict:
         res = gate.submit(request)
@@ -310,6 +334,8 @@ def _collect(p: Pass, bot, names: dict) -> None:
 
 
 def _counts(p: Pass) -> str:
+    if p.receipts_refused:
+        return "the receipts no longer match an earlier checkpoint; see the brief"
     if p.error:
         return "a scheduled run failed; see the brief"
     return ("mail sync failed, see the brief; " if p.sync_failed else "") + (
@@ -329,6 +355,10 @@ def render_brief(p: Pass, last_run: str | None = None) -> str:
         lines.append("Nothing new, so the cloud model was not called.")
     if p.error:
         lines += ["", f"**The run did not finish:** {p.error}. The new mail stays unread for the next run."]
+    if p.receipts:
+        lines += ["", ("**Receipts:** " if p.receipts_refused else "Receipts: ") + p.receipts
+                  + (". Check them with `homestead-gate watch --ledger LEDGER --anchors DIR`." if p.receipts_refused
+                     else "")]
     lines += ["", "## Done"] + ([f"- {d}" for d in p.done] or ["- Nothing sent or paid."])
     lines += ["", "## Waiting for you"] + ([f"- {w}" for w in p.waiting] or ["- Nothing from this run."])
     if p.earlier_waiting:

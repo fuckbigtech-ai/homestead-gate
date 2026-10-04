@@ -20,7 +20,7 @@ from typing import Protocol
 
 from homestead_memory.core import ledger
 
-from . import adapters
+from . import adapters, receipts
 from .approval import NO_MODEL_REASON, HumanDecision
 from .policy import Policy
 from .reviewer import Verdict, render
@@ -65,10 +65,14 @@ def describe(action: dict) -> str:
 
 class Gate:
     def __init__(self, *, policy: Policy, reviewer: Reviewer, approver: Approver, ledger_dir: Path,
-                 task: str, session: str, outbox: Path, smtp: dict | None = None, live: bool = False):
+                 task: str, session: str, outbox: Path, smtp: dict | None = None, live: bool = False,
+                 mac_key: bytes | None = None):
         self.policy, self.reviewer, self.approver = policy, reviewer, approver
         self.ledger_dir, self.task, self.session = Path(ledger_dir), task, session
         self.outbox, self.smtp, self.live = Path(outbox), smtp, live
+        # The receipt ledger's MAC key (receipts.py), from the OS credential store. The caller fetches
+        # it once; None (tests, the demo, no credential store) writes plain records as before.
+        self.mac_key = mac_key
         # Payload hashes a human refused in this session: denied, or held by a scheduled pass. An identical
         # retry is refused by policy without a second review or a second question. Not stored: policy
         # denies (they repeat on their own, and the hourly cap lifts), and a terminal card nobody answered
@@ -79,6 +83,10 @@ class Gate:
         self._inflight: dict[str, threading.Event] = {}
 
     def _log(self, action: str, summary: str, meta: dict, phase: str, target: str) -> None:
+        if self.mac_key:
+            receipts.append(self.mac_key, action, target=target, summary=summary, meta=meta,
+                            vault=self.ledger_dir, agent=AGENT, session=self.session, phase=phase)
+            return
         ledger.append(action, target=target, summary=summary, meta=meta, vault=self.ledger_dir,
                       agent=AGENT, session=self.session, phase=phase)
 

@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SEPOLIA = 11155111
+_NOT_RULES = frozenset({"anchor_dir", "anchor_command"})
 
 
 SPEND_WORDS = re.compile(r"\b(pay|pays|paid|payment|payments|invoices?|bills?|tip|tips|reimburse\w*|refund\w*|transfer\w*|wire|settle)\b|\bsend\b[^.\n]{0,40}(\$\s?\d|\d[\d.,]*\s?(eth|usdc|usdt|usd|dollars?|cad)\b)", re.I)
@@ -47,6 +48,10 @@ class Policy:
     review_think: bool = False       # [review] think = true: the reviewer reasons first (slower, fewer false blocks)
     override_delay_s: float = 60
     approval_timeout_s: float = 300
+    # [receipts]: where checkpoints are anchored off this machine. Not rules about actions, so they
+    # are left out of `version` (an anchor change must not invalidate approvals or payload hashes).
+    anchor_dir: str = ""
+    anchor_command: str = ""
     _recent: deque = field(default_factory=deque, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _auto_spent: deque = field(default_factory=deque, repr=False)   # (time, eth) auto-approved in 24h
@@ -56,6 +61,7 @@ class Policy:
         d = tomllib.loads(Path(path).read_text())
         u, e, v = d.get("user", {}), d.get("email", {}), d.get("evm", {})
         lim, rv, ap = d.get("limits", {}), d.get("review", {}), d.get("approval", {})
+        rc = d.get("receipts", {})
         p = cls(
             user_email=u.get("email", ""), user_wallet=u.get("wallet", ""),
             email_allow=list(e.get("allow", [])), evm_allow=list(v.get("allow", [])),
@@ -68,6 +74,7 @@ class Policy:
             review_timeout_s=float(rv.get("timeout_s", 120)), review_think=bool(rv.get("think", False)),
             override_delay_s=float(ap.get("override_delay_s", 60)),
             approval_timeout_s=float(ap.get("timeout_s", 300)),
+            anchor_dir=str(rc.get("anchor_dir", "")), anchor_command=str(rc.get("anchor_command", "")),
         )
         if p.chain_id != SEPOLIA:
             # v1 is testnet only. Refusing to load beats a mainnet transaction nobody meant.
@@ -79,7 +86,7 @@ class Policy:
         """Short hash of every rule. Recorded with each decision so an approval given under one
         set of rules is never mistaken for one given under another (u/arthaudm, 2026-09-30:
         "include the policy version so a changed rule can't reuse an old approval")."""
-        rules = {k: v for k, v in sorted(vars(self).items()) if not k.startswith("_")}
+        rules = {k: v for k, v in sorted(vars(self).items()) if not k.startswith("_") and k not in _NOT_RULES}
         return hashlib.sha256(json.dumps(rules, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
     @property

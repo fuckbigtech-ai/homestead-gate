@@ -31,3 +31,28 @@ def _no_real_keychain(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", guarded_run)
     monkeypatch.setattr(subprocess, "Popen", guarded_popen)
+
+
+class FakeLedgerKeyStore:
+    """The receipt ledger's key, held in memory for one test. Production code reaches it through
+    credstore.load_or_create_ledger_key / load_ledger_key; the real store is unreachable (above)."""
+    def __init__(self):
+        self.key = None
+
+    def load_or_create(self):
+        import secrets
+        if self.key is None:
+            self.key = secrets.token_bytes(32)
+        return self.key
+
+    def load(self):
+        return self.key
+
+
+@pytest.fixture(autouse=True)
+def ledger_key_store(monkeypatch):
+    from homestead_gate import credstore
+    fake = FakeLedgerKeyStore()
+    monkeypatch.setattr(credstore, "load_or_create_ledger_key", fake.load_or_create)
+    monkeypatch.setattr(credstore, "load_ledger_key", fake.load)
+    return fake

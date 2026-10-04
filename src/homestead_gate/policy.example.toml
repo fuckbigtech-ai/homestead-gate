@@ -26,3 +26,13 @@ timeout_s = 120
 [approval]
 override_delay_s = 60      # wait before you can approve something the model flagged
 timeout_s = 300            # unanswered requests expire and are not executed
+
+[receipts]
+# Signed checkpoints of the receipts are written when a gate session ends, after every scheduled
+# pass and on `homestead-gate watch`. Anchor them somewhere someone with this machine can't rewrite
+# afterwards: each checkpoint becomes a NEW file there, nothing is ever overwritten.
+# anchor_dir = "~/Library/Mobile Documents/com~apple~CloudDocs/homestead-anchors"   # iCloud, Dropbox, USB, NAS
+# A command that gets the checkpoint JSON on stdin ($HG_CHECKPOINT is the same JSON as a file,
+# $HG_CHECKPOINT_NAME a unique name). Email it to yourself, push it to a private repo, or have a
+# timestamp authority stamp it (README, "Receipts as audit evidence").
+# anchor_command = "cat > ~/hg-outbox/$HG_CHECKPOINT_NAME.json"

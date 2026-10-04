@@ -3,7 +3,8 @@
   homestead-gate up                                            set up if needed, then run the gate on 127.0.0.1:6000
   homestead-gate doctor                                        one-screen health check
   homestead-gate demo                                          hijacked agent vs the gate, end to end
-  homestead-gate watch                                         the receipts (same as `hsm watch`)
+  homestead-gate watch                                         the receipts, verified and checkpointed
+  homestead-gate watch --anchors DIR --no-checkpoint           an auditor's check against anchored checkpoints
   homestead-gate run --allow-host api.anthropic.com -- claude   the agent, sandboxed; the gate is its only way out
   homestead-gate mcp                                           MCP tools for your agent (claude mcp add homestead-gate -- homestead-gate mcp)
   homestead-gate assistant --skill triage                      the personal assistant: cloud brain, local gate
@@ -39,6 +40,82 @@ def where(url: str) -> str:
 def _watch(ledger_dir: Path, n: int = 30) -> int:
     from homestead_memory import cli as hsm
     return hsm.main(["watch", str(ledger_dir), "-n", str(n)])
+
+
+def _err(s: str) -> None:
+    print(s, file=sys.stderr)
+
+
+def _seal(ledger_dir: Path, policy, reviewer_model, reason: str, keys) -> "receipts.SealResult":
+    """Checkpoint and anchor the receipts; say what happened in one line."""
+    from . import receipts
+    r = receipts.seal(ledger_dir, policy=policy, reviewer_model=reviewer_model, reason=reason, keys=keys, log=_err)
+    if r.status == "written":
+        cp = r.checkpoint
+        print(f"  receipts: checkpoint of {cp['records']} records, head {cp['head_hash'][:12]}…, "
+              + ("signed" if cp.get("signed") else "UNSIGNED")
+              + (f", anchored to {', '.join(r.anchored)}" if r.anchored else ", not anchored off this machine "
+                 "(set [receipts] anchor_dir or anchor_command in the policy)"))
+    return r
+
+
+def _find_policy(ledger_dir: Path, explicit: str | None):
+    """The policy that owns this ledger: --policy, else the policy.toml next to it."""
+    cands = [Path(explicit).expanduser()] if explicit else [ledger_dir.parent / "policy.toml"]
+    for c in cands:
+        if c.exists():
+            try:
+                return Policy.load(c)
+            except (OSError, ValueError) as e:
+                _err(f"  -- policy {c} not read ({e}); no anchors from it")
+    return None
+
+
+def cmd_watch(a) -> int:
+    """The receipts: hsm's chain check, then the gate's MACs, then the anchors, then a checkpoint.
+    The checkpoint is written only when everything before it passed, and never with --no-checkpoint
+    (an auditor checking a copy must not plant a key in their own keychain or write into evidence)."""
+    from . import receipts
+    from homestead_memory.core import ledger as hl
+    led = Path(a.ledger).expanduser()
+    rc = _watch(led, a.n)
+    recs = hl.read_all(led)
+    keys = None
+    if receipts.has_macs(recs):
+        keys = receipts.ledger_keys(create=False, warn=_err)
+        if keys is None:
+            _err("  -- records carry MACs, but this machine has no ledger key: MACs not checked")
+        else:
+            m = receipts.verify_macs(recs, keys.mac_key)
+            for pr in m.problems():
+                _err(f"  !! {pr}")
+            if m.ok:
+                _err(f"  ok  {m.checked} record MAC(s) verify" +
+                     (f"; {m.unkeyed_before} older record(s) predate MACs" if m.unkeyed_before else ""))
+            else:
+                rc = 1
+    policy = _find_policy(led, a.policy)
+    dirs = [Path(a.anchors).expanduser()] if a.anchors else []
+    if policy is not None and policy.anchor_dir:
+        pd = Path(policy.anchor_dir).expanduser()
+        if pd.is_dir() and pd.resolve() not in {d.resolve() for d in dirs}:
+            dirs.append(pd)
+    for d in dirs:
+        _err(f"  anchors: {d}")
+        rep_ = receipts.verify_anchors(led, d, signer=a.signer)
+        for line in rep_.lines:
+            _err(f"  {line}")
+        if not rep_.ok:
+            rc = 1
+    if a.anchors and not Path(a.anchors).expanduser().is_dir():
+        _err(f"  !! --anchors {a.anchors} is not a directory")
+        rc = 1
+    if rc == 0 and not a.no_checkpoint and recs:
+        r = _seal(led, policy, policy.model if policy else None, "watch",
+                  keys or receipts.ledger_keys(create=True, warn=_err))
+        if r.status == "refused":
+            rc = 1
+    return rc
 
 
 def _ask(prompt: str) -> str:
@@ -193,10 +270,12 @@ def cmd_up(a) -> int:
 
 
 def _serve(policy: Policy, a, task: str, smtp=None) -> int:
+    from . import receipts
     live = smtp is not None
     ledger_dir = Path(a.ledger).expanduser()
     session = secrets.token_hex(4)
-    gate = Gate(policy=policy,
+    keys = receipts.ledger_keys(warn=_err)
+    gate = Gate(policy=policy, mac_key=keys.mac_key if keys else None,
                 reviewer=OllamaReviewer(policy.model, policy.ollama_url, policy.review_timeout_s, think=policy.review_think),
                 approver=TerminalApprover(override_delay_s=policy.override_delay_s,
                                           timeout_s=policy.approval_timeout_s),
@@ -215,7 +294,9 @@ def _serve(policy: Policy, a, task: str, smtp=None) -> int:
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\nstopped.")
-    return 0
+    finally:
+        r = _seal(ledger_dir, policy, policy.model, "session-end", keys)    # the session's receipts, sealed
+    return 1 if r.status == "refused" else 0
 
 
 def cmd_doctor(a) -> int:
@@ -590,7 +671,11 @@ def cmd_assistant(a) -> int:
                 if a.model:
                     p.model = a.model
                 return p
-            results = always_on.resolve_pending(data, policy_factory=fresh, reviewer=reviewer, approver=approver)
+            from . import receipts
+            keys = receipts.ledger_keys(warn=_err)
+            results = always_on.resolve_pending(data, policy_factory=fresh, reviewer=reviewer, approver=approver,
+                                                mac_key=keys.mac_key if keys else None)
+            _seal(data / "ledger", policy, getattr(reviewer, "model", None) or policy.model, "pending", keys)
             for r in results:
                 print(f"  -> {r['result'].get('status')}" + (f" by {r['result']['by']}" if r["result"].get("by") else ""))
             _offer_remember(memory, [(r["item"].get("action") or {}, r["result"]) for r in results])
@@ -680,7 +765,9 @@ def cmd_assistant(a) -> int:
             return rc
     ledger_dir = data / "ledger"
     spent = asst.replay_auto_spend(policy, ledger_dir)
-    gate = Gate(policy=policy, reviewer=reviewer,
+    from . import receipts
+    keys = receipts.ledger_keys(warn=_err)
+    gate = Gate(policy=policy, reviewer=reviewer, mac_key=keys.mac_key if keys else None,
                 approver=TerminalApprover(override_delay_s=policy.override_delay_s,
                                           timeout_s=policy.approval_timeout_s),
                 ledger_dir=ledger_dir, task=task, session=secrets.token_hex(4),
@@ -694,8 +781,10 @@ def cmd_assistant(a) -> int:
         out = bot.run()
     except LLMError as e:
         print(f"assistant: the cloud model failed: {e}", file=sys.stderr)
+        _seal(ledger_dir, policy, getattr(reviewer, "model", None) or policy.model, "session-end", keys)
         return 1
     print("\n" + (out["final"] or "(no answer)"))
+    _seal(ledger_dir, policy, getattr(reviewer, "model", None) or policy.model, "session-end", keys)
     _offer_remember(memory, [(r["action"], r["result"]) for r in out["requests"]])
     return 0
 
@@ -822,10 +911,16 @@ def main(argv=None) -> int:
     crs.add_parser("status").set_defaults(func=lambda a: (print(__import__("homestead_gate.credstore", fromlist=["status"]).status()), 0)[1])
     crs.add_parser("clear").set_defaults(func=cmd_creds_clear)
 
-    w = sub.add_parser("watch", help="show the receipts; exits 1 if the chain is broken")
+    w = sub.add_parser("watch", help="show and verify the receipts, then checkpoint them; exits 1 on any mismatch")
     w.add_argument("--ledger", default=str(HOME / "ledger"))
     w.add_argument("-n", type=int, default=30)
-    w.set_defaults(func=lambda a: _watch(Path(a.ledger).expanduser(), a.n))
+    w.add_argument("--anchors", metavar="DIR",
+                   help="re-verify the chain against the checkpoints anchored in DIR; reports the first divergence")
+    w.add_argument("--policy", help="the policy with [receipts] (default: policy.toml next to the ledger)")
+    w.add_argument("--signer", help="require anchored checkpoints to be signed by this Ed25519 public key (hex)")
+    w.add_argument("--no-checkpoint", action="store_true",
+                   help="verify only: no checkpoint, no anchor, no key created (for an auditor's copy)")
+    w.set_defaults(func=cmd_watch)
 
     a = p.parse_args(argv)
     return a.func(a)
