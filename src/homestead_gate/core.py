@@ -47,8 +47,10 @@ class Reviewer(Protocol):
 class Approver(Protocol):
     # context (optional): extra information for the human's eyes only, e.g. {"web_lookup": {...}}.
     # An approver written before it existed simply does not take it, and the gate does not pass it.
+    # second (dual control): the registered second approvers' names. Passed only to an approver whose
+    # class sets collects_second = True; any other approver's yes on a dual-control action is a deny.
     def ask(self, *, rid: str, action: dict, flagged: bool, review_reason: str, span: str,
-            context: dict | None = None) -> HumanDecision: ...
+            context: dict | None = None, second: list[str] | None = None) -> HumanDecision: ...
 
 
 def _takes_context(fn) -> bool:
