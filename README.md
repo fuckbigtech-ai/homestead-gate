@@ -386,8 +386,9 @@ are prepared for Sepolia only, unsigned. The gate holds no keys.
   with the old values next to the new. A policy file edited while the gate runs gets a
   `policy.edited` receipt at the next request; the running gate keeps the rules it loaded. Every
   request record carries `policy_sha256` and `policy_version`.
-- **Dual control (optional).** Set `second_approver = true` under `[approval]` (every action), or
-  `dual_control = ["wallet_tx"]` (some types). Register the second person first with
+- **Dual control (optional).** Set `second_approver = true` under `[approval]` (every action that
+  is not to yourself; mail to your own address still passes), or `dual_control = ["wallet_tx"]`
+  (some types). Register the second person first with
   `homestead-gate approver add NAME`: they type a passphrase, and only a salted scrypt hash is kept,
   in `approvers.json` next to the policy (mode 0600). After your yes, the terminal asks for their
   name and passphrase. A wrong one denies; no registered approver denies without asking; an

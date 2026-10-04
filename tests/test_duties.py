@@ -511,3 +511,109 @@ def test_web_card_disables_approve_until_expanded():
     assert "actionList(d.action, d.to_label, d.must_expand)" in on_approval
     for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML"):
         assert bad not in js
+    # on a waiting card, uncut fields show at full height, not in a scroll box someone could skip
+    assert 'cut.has(key) ? "clip" : waiting ? "full" : ""' in js
+
+
+# ---- the gate, not the approver, decides whether the full view was needed --------------------
+
+def test_the_gate_refuses_an_unviewed_yes_from_any_channel(tmp_path):
+    class Hasty:
+        def ask(self, *, rid, action, flagged, review_reason, span):
+            return HumanDecision("approve", "terminal", 0.0)       # claims nothing about the full view
+    g = gate(tmp_path, Hasty())
+    r = g.submit({"action": email(LONG)})
+    assert r["status"] == "denied" and r["reason"] == "approved without being shown all of it"
+    assert decision(tmp_path)["meta"]["full_view"] == {"required": True, "viewed": False}
+
+
+def test_a_held_long_body_records_that_the_full_view_is_required(tmp_path):
+    g = gate(tmp_path, HoldApprover())
+    assert g.submit({"action": email(LONG)})["status"] == "expired"
+    assert decision(tmp_path)["meta"]["full_view"]["required"] is True
+
+
+# ---- each scheduled pass notices an edited policy, even with no new mail ---------------------
+
+def test_a_pass_with_no_new_mail_records_an_edited_policy(tmp_path, monkeypatch):
+    import urllib.request
+
+    from test_always_on import FIRST, run_pass, seeded
+
+    def refuse(*a, **k):
+        raise AssertionError("a test tried to reach the network")
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    monkeypatch.setattr("homestead_gate.always_on.notify", lambda *a, **k: False)
+    data = seeded(tmp_path)
+    run_pass(data, FIRST)                                           # sends: policy.loaded is on file
+    before = ledger.read_all(data / "ledger")
+    assert [r["action"] for r in before].count("policy.loaded") == 1
+    run_pass(data, [])                                              # nothing new, nothing changed
+    assert len(ledger.read_all(data / "ledger")) == len(before)
+    pol = data / "policy.toml"
+    pol.write_text(pol.read_text() + "\n# loosened by someone\n")
+    p, _, _ = run_pass(data, [])                                    # still no new mail
+    assert not p.new_mail
+    ch = [r for r in ledger.read_all(data / "ledger") if r["action"] == "policy.changed"]
+    assert len(ch) == 1 and ch[0]["meta"]["changed"] == ["policy_sha256"]
+
+
+def test_record_policy_if_changed_writes_nothing_on_a_fresh_ledger(tmp_path):
+    gate(tmp_path, terminal()).record_policy_if_changed()
+    assert not (tmp_path / "l").exists()
+
+
+# ---- the web demo route carries viewed ---------------------------------------------------------
+
+def test_http_decide_refuses_approve_without_viewed(tmp_path):
+    import http.client
+    from http.server import ThreadingHTTPServer
+    sys.path.insert(0, str(REPO))
+    from demo.web import server as srv
+    from test_assistant import ATTACKER, call, calls, done
+    from test_assistant import FakeReviewer as AssistantReviewer
+    from test_web_demo import make_app
+
+    long_send = [calls(call("read_email", id="msg-004")),
+                 calls(call("send_email", to=ATTACKER, subject="archive", body=LONG)), done("done.")]
+    app, *_ = make_app(tmp_path, [long_send], reviewer=AssistantReviewer("approve"))   # unflagged: no override
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), srv.make_handler(app))
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+
+    def req(method, path, body=None, headers=None):
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        c.request(method, path, None if body is None else json.dumps(body),
+                  {"Content-Type": "application/json", **(headers or {})})
+        r = c.getresponse()
+        return r.status, dict(r.getheaders()), r.read()
+
+    try:
+        st, h, body = req("POST", "/api/run", {"scenario": "summarize", "unguarded": True})
+        cookie = {"Cookie": h["Set-Cookie"].split(";")[0]}
+        run_id = json.loads(body)["run_id"]
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        c.request("GET", f"/api/runs/{run_id}/events", headers=cookie)
+        stream = c.getresponse()
+        kinds, results = [], []
+        while True:
+            line = stream.readline().decode()
+            if line.startswith("event: "):
+                kinds.append(line[7:].strip())
+            if line.startswith("data: ") and kinds[-1] == "approval":
+                card = json.loads(line[6:])
+                assert card["must_expand"] == ["body"]
+                d = {"run_id": run_id, "rid": card["rid"], "decision": "approve"}
+                st, _, msg = req("POST", "/api/decide", d, cookie)
+                assert st == 409 and "show all of it" in json.loads(msg)["message"]
+                assert req("POST", "/api/decide", {**d, "viewed": "true"}, cookie)[0] == 409
+                assert req("POST", "/api/decide", {**d, "viewed": True}, cookie)[0] == 200
+            if line.startswith("data: ") and kinds[-1] == "gate_result":
+                results.append(json.loads(line[6:]))
+            if kinds and kinds[-1] == "end":
+                break
+        assert any(r.get("status") == "executed" for r in results)
+    finally:
+        httpd.shutdown()
+        app.close()

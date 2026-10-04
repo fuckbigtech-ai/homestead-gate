@@ -310,8 +310,10 @@ function asText(v) {
 }
 
 // mustExpand: the fields the server says a card has to cut short (the same rule as the terminal card).
-// Those start clipped, and the card's Approve stays disabled until they are shown in full.
+// Those start clipped, and the card's Approve stays disabled until they are shown in full. On a waiting
+// card everything else is shown at full height, never inside a scroll box someone could skip.
 function actionList(a, label, mustExpand) {
+  const waiting = Array.isArray(mustExpand);
   const cut = new Set(mustExpand || []);
   const dl = el("dl", "kv");
   const row = (k, v, sub) => {
@@ -325,7 +327,7 @@ function actionList(a, label, mustExpand) {
   const frag = document.createDocumentFragment();
   frag.append(dl);
   const long = (name, key, value) => {
-    const p = el("pre", cut.has(key) ? "clip" : "", value);
+    const p = el("pre", cut.has(key) ? "clip" : waiting ? "full" : "", value);
     frag.append(el("div", "block-label", name), p);
   };
   for (const [name, key] of [["Cc", "cc"], ["Bcc", "bcc"], ["Attachments", "attachments"], ["Calldata", "data"]]) {

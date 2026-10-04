@@ -28,7 +28,7 @@ from typing import Protocol
 from homestead_memory.core import ledger
 
 from . import adapters, approvers
-from .approval import NO_MODEL_REASON, HumanDecision
+from .approval import NO_MODEL_REASON, HumanDecision, needs_full_view
 from .policy import Policy
 from .reviewer import Verdict, render
 
@@ -110,6 +110,17 @@ class Gate:
     def record_policy(self) -> None:
         """Write the start-of-serving policy receipt now (idempotent). `up` calls this at startup."""
         self._check_policy()
+
+    def record_policy_if_changed(self) -> None:
+        """For each scheduled pass, even one with nothing to send: write policy.changed if the policy
+        differs from the last policy receipt in the ledger. Writes nothing otherwise (no noise)."""
+        with self._policy_lock:
+            if self._recorded is not None:
+                return
+            last = self._last_policy_receipt()
+            if last is not None and any(last.get(k) != v for k, v in self._fingerprint().items()
+                                        if k in POLICY_KEYS):
+                self._record_policy(last, first=False)
 
     def _record_policy(self, last: dict | None = None, *, first: bool = True) -> None:
         fp = self._fingerprint()
@@ -242,6 +253,11 @@ class Gate:
                 decision = h.decision
                 reason = "overrode the model's flag" if h.overrode_flag else f"human {h.decision}"
                 extra = {}
+                # The gate decides whether the card had to cut something short, not the approver. A yes
+                # on such a card without the full view is refused, whatever channel it came from.
+                must_view = bool(needs_full_view(action))
+                if decision == "approve" and must_view and not h.full_view_seen:
+                    decision, reason = "deny", "approved without being shown all of it"
                 if dual:
                     ok = False
                     if decision == "approve":
@@ -265,7 +281,7 @@ class Gate:
                     decided_by=decided_by, decision=decision, channel=h.channel,
                     latency_s=h.latency_s, overrode_flag=h.overrode_flag and decision == "approve",
                     approver=h.approver or {"channel": h.channel, "identified": False},
-                    full_view={"required": h.full_view_required, "viewed": h.full_view_seen},
+                    full_view={"required": must_view, "viewed": h.full_view_seen},
                     **extra)
 
         if decided_by == "policy":
