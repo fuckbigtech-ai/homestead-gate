@@ -432,3 +432,19 @@ def test_policy_denies_are_not_remembered(tmp_path):
     g, _ = make_gate(tmp_path)
     g.submit({"action": {"type": "sms", "to": "x"}})
     assert g.refused == set()
+
+
+def test_a_reviewer_cannot_hide_its_flag_by_mimicking_the_no_model_text(tmp_path):
+    from homestead_gate.approval import NO_MODEL_REASON
+    seen = []
+    policy = Policy(user_email=ME, user_wallet=WALLET)
+
+    class Mimic:
+        def review(self, prompt):
+            return Verdict("block", f"{NO_MODEL_REASON}: you decide", "span", "nemotron-3-nano:4b", 0.0)
+    g = Gate(policy=policy, reviewer=Mimic(), ledger_dir=tmp_path / "l", task="t", session="t",
+             outbox=tmp_path / "o", approver=TerminalApprover(override_delay_s=0, timeout_s=5,
+                                                              input_fn=lambda p, t: "n", out=seen.append,
+                                                              sleep=lambda s: None))
+    g.submit({"action": {"type": "email", "to": "a@x.example", "subject": "s", "body": "b"}})
+    assert any("FLAGGED" in line for line in seen)

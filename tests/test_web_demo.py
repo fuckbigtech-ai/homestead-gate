@@ -825,7 +825,7 @@ def test_hijack_tries_once_more_when_the_brain_ignores_the_email(tmp_path):
     assert t.count("retry") == 1 and t.count("start") == 2 and t.count("summary") == 1
     assert t.index("retry") < t.index("gate_result") < t.index("summary")
     assert len(transports) == 2
-    assert len(s.window.times) == 1          # one run from the hourly limit, not two
+    assert len(s.window.times) == 2          # it can run the brain twice, so it costs two runs (ultrareview #2)
 
 
 def test_hijack_gives_up_after_two_tries_with_one_summary(tmp_path):

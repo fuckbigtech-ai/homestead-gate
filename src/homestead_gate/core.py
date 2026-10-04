@@ -21,10 +21,11 @@ from typing import Protocol
 from homestead_memory.core import ledger
 
 from . import adapters
-from .approval import HumanDecision
+from .approval import NO_MODEL_REASON, HumanDecision
 from .policy import Policy
 from .reviewer import Verdict, render
 
+NO_MODEL = "none (--no-model)"       # the model name cli._NoModelReviewer reports
 AGENT = "homestead-gate"
 
 
@@ -132,6 +133,9 @@ class Gate:
                 untrusted_content="\n---\n".join(str(r.get("content", "")) for r in reads),
                 action=action)
             verdict = self.reviewer.review(prompt)
+            if verdict.model != NO_MODEL and verdict.reason.startswith(NO_MODEL_REASON):
+                verdict = Verdict(verdict.verdict, "reviewer said: " + verdict.reason, verdict.span,
+                                  verdict.model, verdict.secs)         # the card keys its label on this text
             # llm:approve | llm:block | llm:invalid. "invalid" means the model did not review it
             # (missing, unreachable, no clear answer); the log must not call that a review.
             # The model's reason is kept out: it can quote the body, and the body stays out.

@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import email
 import imaplib
+import hashlib
 import json
+import re
 import os
 import ssl
 import tomllib
@@ -98,9 +100,12 @@ def load_config(data: Path) -> ImapConfig | None:
         return None
     if not isinstance(d, dict) or not d.get("host") or not d.get("user"):
         return None
-    return ImapConfig(host=str(d["host"]), user=str(d["user"]), port=int(d.get("port", 993)),
-                      mailbox=str(d.get("mailbox", "INBOX")), days=max(1, int(d.get("days", 3))),
-                      max_messages=max(1, int(d.get("max_messages", 50))))
+    try:
+        return ImapConfig(host=str(d["host"]), user=str(d["user"]), port=int(d.get("port", 993)),
+                          mailbox=str(d.get("mailbox", "INBOX")), days=max(1, int(d.get("days", 3))),
+                          max_messages=max(1, int(d.get("max_messages", 50))))
+    except (TypeError, ValueError):
+        raise MailboxError("config", "[imap] port, days and max_messages in policy.toml must be numbers") from None
 
 
 def _imap_section(cfg: ImapConfig) -> str:
@@ -205,7 +210,14 @@ def html_to_text(html: str) -> str:
     return _tidy("".join(p.out))
 
 
+# C0 and C1 control characters except tab and newline: an encoded subject can carry terminal escapes
+# (ESC [8m hides text) that --sync and the briefs would print raw.
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+INBOX_KEEP = 500                 # newest entries kept in inbox.json; older ones are long handled
+
+
 def _tidy(text: str) -> str:
+    text = _CTRL.sub("", text)
     lines = [" ".join(ln.split()) for ln in text.replace("\r", "").split("\n")]
     out: list[str] = []
     for ln in lines:
@@ -222,7 +234,7 @@ def _header(msg, name: str) -> str:
         s = str(make_header(decode_header(str(v))))
     except Exception:  # noqa: BLE001 - a malformed encoded word: keep it as it came
         s = str(v)
-    return " ".join(s.split())
+    return " ".join(_CTRL.sub("", s).split())
 
 
 def _part_text(part) -> str:
@@ -268,8 +280,18 @@ def parse_message(raw: bytes, msg_id: str, *, cut_short: bool = False) -> dict:
     """One RFC 822 message as an inbox.json entry."""
     hdr = email.message_from_bytes(raw)                              # compat32: raw headers
     msg = email.message_from_bytes(raw, policy=default_policy)       # for the body
-    name, addr = parseaddr(_header(hdr, "From"))
+    name, addr = parseaddr(str(hdr.get("From") or ""))
+    try:
+        name = str(make_header(decode_header(name)))
+    except Exception:  # noqa: BLE001
+        pass
+    name = " ".join(_CTRL.sub("", name).split())
+    if "@" in name:                    # "sam@rivera-plumbing.example" <attacker@evil.example>
+        name = f"{name} (display name only; the sender's address is {addr})"
+    if any(c.isspace() or c in "<>" for c in addr):
+        addr = ""
     body, attachments = _body(msg)
+    body = _CTRL.sub("", body)
     if len(body) > BODY_MAX:
         body = body[:BODY_MAX] + f"\n[... {len(body) - BODY_MAX} more characters cut]"
     if cut_short:
@@ -280,6 +302,15 @@ def parse_message(raw: bytes, msg_id: str, *, cut_short: bool = False) -> dict:
             "subject": _header(hdr, "Subject")[:300] or "(no subject)", "date": _date(_header(hdr, "Date")),
             "body": body, "attachments": attachments, "message_id": _header(hdr, "Message-ID")[:300],
             "source": "imap"}
+
+
+def _dedupe_key(m: dict) -> str:
+    """Message-ID when there is one; otherwise a hash of sender, date, subject and the body's start, so a
+    message without a Message-ID is not handled twice after the server renumbers the mailbox."""
+    if m.get("message_id"):
+        return str(m["message_id"])
+    basis = "|".join(str(m.get(k, "")) for k in ("from", "date", "subject")) + "|" + str(m.get("body", ""))[:200]
+    return "h:" + hashlib.sha256(basis.encode()).hexdigest()[:24]
 
 
 # ---------------------------------------------------------------- sync
@@ -377,6 +408,9 @@ def sync(data: Path, cfg: ImapConfig, password: str, *, connect: Callable | None
             raise MailboxError("network", f"{cfg.host} dropped the connection during login: {e}") from None
         except imaplib.IMAP4.error as e:
             raise MailboxError("auth", f"{cfg.host} refused the login for {cfg.user}: {e}\n" + auth_help(cfg)) from None
+        except UnicodeError:
+            raise MailboxError("auth", "the address or password has non-ASCII characters, which IMAP LOGIN "
+                               "cannot send. App passwords are plain letters.\n" + auth_help(cfg)) from None
         try:
             return _sync(conn, data, cfg, now)
         except imaplib.IMAP4.abort as e:
@@ -421,7 +455,7 @@ def _sync(conn, data: Path, cfg: ImapConfig, now: datetime) -> SyncResult:
     except (OSError, ValueError):
         inbox = []
     ids = {m.get("id") for m in inbox if isinstance(m, dict)}
-    mids = {m.get("message_id") for m in inbox if isinstance(m, dict) and m.get("message_id")}
+    mids = {_dedupe_key(m) for m in inbox if isinstance(m, dict)}
     for uid in take:
         mid = f"imap-{uidvalidity}-{uid}"
         if mid in ids:
@@ -436,15 +470,14 @@ def _sync(conn, data: Path, cfg: ImapConfig, now: datetime) -> SyncResult:
             entry = {"id": mid, "from": "", "name": "", "subject": "(could not be read)", "date": "",
                      "body": "[this message could not be parsed]", "attachments": [], "message_id": "",
                      "source": "imap"}
-        if entry["message_id"] and entry["message_id"] in mids:
+        if _dedupe_key(entry) in mids:
             out.duplicates += 1
             continue
         out.new.append(entry)
         ids.add(mid)
-        if entry["message_id"]:
-            mids.add(entry["message_id"])
-    if out.new:
-        _write_private(p, json.dumps(inbox + out.new, indent=1))       # inbox first: a re-sync dedupes
+        mids.add(_dedupe_key(entry))
+    if out.new:                                   # inbox first: a re-sync dedupes. Newest INBOX_KEEP kept.
+        _write_private(p, json.dumps((inbox + out.new)[-INBOX_KEEP:], indent=1))
     _write_private(data / STATE_FILE, json.dumps({
         "account": cfg.account, "uidvalidity": uidvalidity, "last_uid": max([last, *uids]),
         "last_sync": now.isoformat(timespec="seconds")}, indent=1))

@@ -425,3 +425,44 @@ def test_a_real_inbox_gets_the_thinking_reviewer(tmp_path):
     data = tmp_path / "mail"
     mailbox.prepare_data_dir(data, USER, "nemotron-3-nano:4b")
     assert Policy.load(data / "policy.toml").review_think is True
+
+
+# ---- code review follow-ups (2026-10-04) --------------------------------------------------
+def test_an_encoded_display_name_cannot_pose_as_a_known_address():
+    raw = (b"From: =?utf-8?q?sam=40rivera-plumbing.example?= <attacker@evil.example>\r\n"
+           b"Subject: invoice\r\nDate: Thu, 01 Oct 2026 10:00:00 +0000\r\nMessage-ID: <s@y>\r\n\r\npay me")
+    e = mailbox.parse_message(raw, "imap-1-9")
+    assert e["from"] == "attacker@evil.example"
+    assert "display name only" in e["name"] and "attacker@evil.example" in e["name"]
+
+
+def test_terminal_control_characters_are_stripped():
+    raw = (b"From: Dana <dana@friends.example>\r\nSubject: =?utf-8?q?hi=1B[8mhidden=1B[0m?=\r\n"
+           b"Date: Thu, 01 Oct 2026 10:00:00 +0000\r\nMessage-ID: <c@y>\r\n\r\nbody\x1b[2Jclear\x07")
+    e = mailbox.parse_message(raw, "imap-1-10")
+    assert "\x1b" not in e["subject"] and "\x1b" not in e["body"] and "\x07" not in e["body"]
+
+
+def test_messages_without_a_message_id_are_not_doubled_after_a_renumbering():
+    a = {"from": "x@y", "date": "2026-10-01 10:00", "subject": "s", "body": "b", "message_id": ""}
+    assert mailbox._dedupe_key(a) == mailbox._dedupe_key(dict(a, id="imap-2-1"))
+    assert mailbox._dedupe_key(a) != mailbox._dedupe_key(dict(a, subject="t"))
+
+
+def test_a_bad_number_in_imap_config_is_a_config_error(tmp_path):
+    data = tmp_path / "mail"
+    data.mkdir()
+    (data / "policy.toml").write_text('[imap]\nhost = "imap.gmail.com"\nuser = "o@gmail.com"\nport = "nine"\n')
+    with pytest.raises(mailbox.MailboxError) as e:
+        mailbox.load_config(data)
+    assert e.value.kind == "config"
+
+
+def test_the_inbox_keeps_only_the_newest_entries(tmp_path, monkeypatch):
+    monkeypatch.setattr(mailbox, "INBOX_KEEP", 3)
+    data = fresh(tmp_path)
+    (data / "inbox.json").write_text(json.dumps([{"id": f"old-{i}", "message_id": f"<o{i}>"} for i in range(3)]))
+    imap = FakeIMAP({1: msg(1), 2: msg(2)})
+    mailbox.sync(data, config(), PASSWORD, connect=lambda h, p: imap, now=NOW)
+    ids = [m["id"] for m in inbox(data)]
+    assert len(ids) == 3 and ids[0] == "old-2" and ids[-1].endswith("-2")

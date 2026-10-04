@@ -55,7 +55,7 @@ COOKIE = "hg_demo"
 
 SESSION_TTL_S = 3600
 MAX_SESSIONS = 200
-GLOBAL_RUNS_PER_HOUR = int(os.environ.get("DEMO_GLOBAL_RUNS_PER_HOUR", "20"))
+GLOBAL_RUNS_PER_HOUR = int(os.environ.get("DEMO_GLOBAL_RUNS_PER_HOUR", "10"))   # owner, 2026-10-04: caps card risk
 SESSION_RUNS_PER_HOUR = int(os.environ.get("DEMO_SESSION_RUNS_PER_HOUR", "5"))
 MAX_CONCURRENT_RUNS = 3
 RUN_TOKEN_BUDGET = int(os.environ.get("DEMO_RUN_TOKEN_BUDGET", "60000"))
@@ -400,7 +400,7 @@ class App:
             injection, unguarded = agentdojo_attack.email_body(), False     # the warning is never removed
         elif scenario == "hijack":
             injection, unguarded = "", True                                 # the default poisoned email
-        cost = 2 if scenario == "morning" else 1
+        cost = 2 if scenario in ("morning", "hijack") else 1         # both can run the brain twice
         now = self.clock()
         with self.lock:
             if now - s.created >= self.ttl:

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import hardware, installer
 from .approval import NO_MODEL_REASON, TerminalApprover
-from .core import Gate
+from .core import NO_MODEL, Gate
 from .policy import Policy
 from .reviewer import OllamaReviewer, Verdict
 
@@ -418,7 +418,7 @@ def cmd_demo(a) -> int:
 class _NoModelReviewer:
     """For `assistant --no-model`: reviews nothing, so every non-self action goes to you. Labelled."""
     def review(self, prompt: str) -> Verdict:
-        return Verdict("invalid", f"{NO_MODEL_REASON}: you decide", "", "none (--no-model)", 0.0)
+        return Verdict("invalid", f"{NO_MODEL_REASON}: you decide", "", NO_MODEL, 0.0)
 
 
 ASSISTANT_REVIEWER = "nemotron-3-nano:4b"
@@ -511,9 +511,18 @@ def _imap_setup(a, data: Path) -> int:
 
 
 def _imap_sync(data: Path) -> int:
-    from . import mailbox
+    from . import always_on, mailbox
     try:
-        r = mailbox.sync_configured(data)
+        if not data.is_dir():
+            r = mailbox.sync_configured(data)         # no data dir: the config error says how to set it up
+            print(f"sync: {r.summary()}")
+            return 0
+        with always_on._Lock(data / always_on.LOCK_FILE) as got:
+            if not got:
+                print("sync: a watch pass is running in this data dir; it syncs first. Try again shortly.",
+                      file=sys.stderr)
+                return 1
+            r = mailbox.sync_configured(data)
     except mailbox.MailboxError as e:
         print(f"sync: {e}", file=sys.stderr)
         return 2 if e.kind == "config" else 1
