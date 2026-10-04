@@ -21,7 +21,7 @@ from homestead_gate.approval import (BODY_LINES, FIELD_CHARS, HumanDecision, Ter
                                      needs_full_view)
 from homestead_gate.cli import main as cli_main
 from homestead_gate.core import Gate
-from homestead_gate.policy import Policy
+from homestead_gate.policy import _NOT_RULES, Policy
 from homestead_gate.reviewer import Verdict
 
 REPO = Path(__file__).resolve().parents[1]
@@ -215,7 +215,10 @@ def test_policy_built_in_code_has_no_file_hash(tmp_path):
 def test_policy_version_is_unchanged_when_dual_control_is_off():
     # policies written before dual control keep their rule hash, so old receipts still match
     p = Policy(user_email=ME)
-    rules = {k: v for k, v in sorted(vars(p).items()) if not k.startswith("_") and k != "dual_control"}
+    # the rule hash as it was before dual control: every rule field (version's own exclusions, such as
+    # the [receipts] anchor settings and the display-only [lookup] switch, stay excluded)
+    rules = {k: v for k, v in sorted(vars(p).items()) if not k.startswith("_") and k != "dual_control"
+             and k not in _NOT_RULES}
     want = hashlib.sha256(json.dumps(rules, sort_keys=True, default=str).encode()).hexdigest()[:16]
     assert p.version == want
     assert Policy(user_email=ME, dual_control=["wallet_tx"]).version != p.version

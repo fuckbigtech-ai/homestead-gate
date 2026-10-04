@@ -28,7 +28,7 @@ from typing import Protocol
 
 from homestead_memory.core import ledger
 
-from . import adapters, approvers
+from . import adapters, approvers, receipts
 from . import lookup as web_lookup
 from .approval import NO_MODEL_REASON, HumanDecision, needs_full_view
 from .policy import Policy
@@ -90,7 +90,8 @@ def describe(action: dict) -> str:
 class Gate:
     def __init__(self, *, policy: Policy, reviewer: Reviewer, approver: Approver, ledger_dir: Path,
                  task: str, session: str, outbox: Path, smtp: dict | None = None, live: bool = False,
-                 lookup: "web_lookup.TavilyLookup | None" = None, lookup_cache: dict | None = None):
+                 lookup: "web_lookup.TavilyLookup | None" = None, lookup_cache: dict | None = None,
+                 mac_key: bytes | None = None):
         self.policy, self.reviewer, self.approver = policy, reviewer, approver
         # Optional web lookup of unknown recipients (lookup.py). None means off. Its results are
         # for the human only; see _recipient_context. The cache is per target for the session; a
@@ -99,6 +100,9 @@ class Gate:
         self._lookup_cache: dict = {} if lookup_cache is None else lookup_cache
         self.ledger_dir, self.task, self.session = Path(ledger_dir), task, session
         self.outbox, self.smtp, self.live = Path(outbox), smtp, live
+        # The receipt ledger's MAC key (receipts.py), from the OS credential store. The caller fetches
+        # it once; None (tests, the demo, no credential store) writes plain records as before.
+        self.mac_key = mac_key
         # Payload hashes a human refused in this session: denied, or held by a scheduled pass. An identical
         # retry is refused by policy without a second review or a second question. Not stored: policy
         # denies (they repeat on their own, and the hourly cap lifts), and a terminal card nobody answered
@@ -182,6 +186,10 @@ class Gate:
                            "policy_version": self.policy.version}, None, "gate:policy")
 
     def _log(self, action: str, summary: str, meta: dict, phase: str | None, target: str) -> None:
+        if self.mac_key:
+            receipts.append(self.mac_key, action, target=target, summary=summary, meta=meta,
+                            vault=self.ledger_dir, agent=AGENT, session=self.session, phase=phase)
+            return
         ledger.append(action, target=target, summary=summary, meta=meta, vault=self.ledger_dir,
                       agent=AGENT, session=self.session, phase=phase)
 

@@ -19,6 +19,11 @@ The assistant's read-only IMAP login (mailbox.py) is a separate entry, "homestea
 password saved for reading mail is never used to send: live email still needs `creds set-smtp`
 and `--live`.
 
+The receipt ledger's key is a third entry, "homestead-gate-ledger-key". Unlike the passwords it is
+generated here (32 random bytes, stored as hex) on first use, handed to the store on stdin, never in
+argv, and never written to a file. receipts.py derives the checkpoint signing key and the per-record
+MAC key from it.
+
 The optional Tavily key (lookup.py, web lookup of unknown recipients) is the entry "tavily-api-key".
 It is read without an account name, so `security add-generic-password -s tavily-api-key -a <any> -w`
 works. It is only ever sent to api.tavily.com as the Authorization header.
@@ -26,6 +31,8 @@ works. It is only ever sent to api.tavily.com as the Authorization header.
 from __future__ import annotations
 
 import os
+import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -36,6 +43,12 @@ from subprocess import TimeoutExpired      # by name: tests swap the subprocess 
 SERVICE = "homestead-gate-smtp"
 IMAP_SERVICE = "homestead-gate-imap"
 TAVILY_SERVICE = "tavily-api-key"
+LEDGER_KEY_SERVICE = "homestead-gate-ledger-key"
+LEDGER_KEY_ACCOUNT = "receipts"
+# The last head the gate sealed for each ledger ("records:head", one entry per ledger path). Not a
+# secret, but kept here because it is the one local record someone with only your files can't rewrite:
+# a rebuilt chain that also deletes every checkpoint file still has to extend it.
+LEDGER_HEAD_SERVICE = "homestead-gate-ledger-head"
 LOOKUP_TIMEOUT_S = 20
 HOME = Path.home() / ".homestead-gate"
 CONFIG = HOME / "smtp.toml"
@@ -106,6 +119,70 @@ def _delete_secret(service: str, user: str) -> None:
         subprocess.run(["security", "delete-generic-password", "-s", service, "-a", user], capture_output=True)
     else:
         subprocess.run(["secret-tool", "clear", "service", service, "user", user], capture_output=True)
+
+
+def _store_generated_secret(service: str, user: str, secret: str, label: str) -> None:
+    """Store a secret this process generated, without it ever appearing in argv or a file.
+
+    macOS: `security -i` reads its command from stdin, so the key is never in the process list
+    (`add-generic-password ... -w KEY` as arguments would be). -T names this interpreter, as for the
+    passwords; reads go through /usr/bin/security, so it does not make them silent or exclusive.
+    Linux: secret-tool reads the secret from stdin when stdin is not a terminal."""
+    if not re.fullmatch(r"[0-9a-f:]+", secret) or not re.fullmatch(r"[0-9a-z-]+", user):
+        raise CredentialError("refusing to store a generated value with unexpected characters")
+    if _backend() == "keychain":
+        exe = sys.executable.replace("\\", "\\\\").replace('"', '\\"')
+        cmd = f'add-generic-password -U -s {service} -a {user} -T "{exe}" -w {secret}\n'
+        argv, stdin = ["security", "-i"], cmd
+    else:
+        argv, stdin = ["secret-tool", "store", "--label", label, "service", service, "user", user], secret
+    try:
+        r = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=LOOKUP_TIMEOUT_S)
+    except TimeoutExpired:
+        raise CredentialError(f"the credential store did not answer within {LOOKUP_TIMEOUT_S}s") from None
+    if r.returncode != 0:
+        raise CredentialError("the credential store did not save the ledger key")
+
+
+def _ledger_key_from_store(create: bool) -> bytes | None:
+    _backend()                                  # CredentialError when there is no store at all
+    hexkey = _load_secret(LEDGER_KEY_SERVICE, LEDGER_KEY_ACCOUNT)
+    if hexkey is None:
+        if not create:
+            return None
+        _store_generated_secret(LEDGER_KEY_SERVICE, LEDGER_KEY_ACCOUNT, secrets.token_hex(32),
+                                "homestead-gate receipt ledger key")
+        hexkey = _load_secret(LEDGER_KEY_SERVICE, LEDGER_KEY_ACCOUNT)
+        if hexkey is None:
+            raise CredentialError("the credential store did not keep the ledger key")
+    hexkey = hexkey.strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", hexkey):
+        raise CredentialError(f"the {LEDGER_KEY_SERVICE} entry is not a 32-byte hex key")
+    return bytes.fromhex(hexkey)
+
+
+def load_or_create_ledger_key() -> bytes:
+    """The receipt ledger's master key from the OS credential store, generated on first use.
+    Raises CredentialError when there is no store; the caller warns and degrades."""
+    key = _ledger_key_from_store(create=True)
+    assert key is not None
+    return key
+
+
+def store_ledger_head(account: str, value: str) -> None:
+    """Record the last sealed head ("records:head") for one ledger; replaces the previous value."""
+    _store_generated_secret(LEDGER_HEAD_SERVICE, account, value, "homestead-gate receipt ledger head")
+
+
+def load_ledger_head(account: str) -> str | None:
+    _backend()
+    return _load_secret(LEDGER_HEAD_SERVICE, account)
+
+
+def load_ledger_key() -> bytes | None:
+    """The ledger key if this machine has one. Never creates one: verifying a copied ledger on an
+    auditor's machine must not plant a key in their keychain."""
+    return _ledger_key_from_store(create=False)
 
 
 def store_smtp(host: str, port: int, user: str, starttls: bool = True) -> None:

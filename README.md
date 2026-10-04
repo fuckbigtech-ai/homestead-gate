@@ -31,9 +31,10 @@ yes. The cloud does the thinking. Your machine has the veto. The cloud can't vot
   AgentDojo). A human in the loop has been measured only with Qwen 3.5 9B as the reviewer: 1 of 143. The plain
   gate (`homestead-gate up`) picks Qwen 3.5 9B or Nano 4B by memory, with thinking off.
 - **Receipts you can check:** every request, verdict and decision is written to a hash chain before anything
-  runs; edit one record and `homestead-gate watch` shows the line where the chain breaks. Limit: anyone with
-  your user's access can rebuild the whole chain; export signed checkpoints off the machine
-  (`hsm checkpoint --export`) if you need evidence that survives that.
+  runs; edit one record and `homestead-gate watch` shows the line where the chain breaks. Each session and
+  each scheduled pass ends with a checkpoint signed by a key kept in your OS keychain, and you can anchor those
+  checkpoints off the machine, so a rebuilt log fails against them too
+  ([Receipts as audit evidence](#receipts-as-audit-evidence)).
 - **Your data:** what Nebius Token Factory and (optionally) Tavily receive, and what their terms say about
   training, retention and region: [Data and vendors](#data-and-vendors).
 - **v1 scope:** payments are unsigned Sepolia testnet transactions and email is a dry run unless you set up
@@ -383,7 +384,7 @@ pip install -e .                         # PyPI release comes later
 homestead-gate up                        # set up, then run the gate on 127.0.0.1:6000
 homestead-gate doctor                    # one-screen health check
 homestead-gate demo                      # a hijacked agent vs the gate, in a throwaway ledger
-homestead-gate watch                     # the receipts; exits 1 if a record was edited
+homestead-gate watch                     # the receipts, verified, then checkpointed; exits 1 on any mismatch
 ```
 
 `homestead-gate up` checks your machine, then picks a reviewer that fits it:
@@ -473,8 +474,9 @@ as they don't know the second passphrase. It does not stop someone who controls 
 with your login can edit `policy.toml` or `approvers.json`, including turning dual control off.
 That is not prevented, only recorded: the next start writes `policy.changed` with the old and new
 hashes. An agent run under `homestead-gate run` cannot write to `~/.homestead-gate`, so it cannot
-make that edit. A person at your keyboard can, and with your files they could also rewrite the
-receipts (see "A rebuilt or shortened ledger" under "What it does not defend against").
+make that edit. A person at your keyboard can, and with your login they could also rewrite the
+receipts that no anchor has seen yet (see "A rebuilt or shortened ledger, before it was anchored" under
+"What it does not defend against").
 
 ### Make the gate the only way out (macOS and Linux)
 
@@ -638,6 +640,118 @@ Fail safe: the lookup can be off, the key can be missing, or the call can time o
 each case the card says "web lookup unavailable" and nothing else changes. The lookup never blocks
 an action and never approves one.
 
+### Receipts as audit evidence
+
+The receipts are the homestead-memory hash chain: each record holds the hash of the one before it, so
+editing one record breaks every hash after it. On its own that is tamper-evident against an edit, but
+not against someone with your files who rebuilds the whole chain, because the hashes are not keyed.
+Three things close most of that gap (`src/homestead_gate/receipts.py`):
+
+- **Signed checkpoints, automatically.** When a gate session ends (`up`, an assistant run, `--pending`),
+  after every scheduled pass, and on `homestead-gate watch`, the gate writes a checkpoint: head hash,
+  record count, time, policy version and reviewer model. It is appended to `checkpoints.jsonl` in the
+  ledger directory and copied to `.hsm/ledger.sig`, so `hsm watch` and `hsm checkpoint --verify` read it
+  too. The signing key is not a file. It is derived from a random key the gate generates on first use and
+  keeps in the OS credential store (keychain entry `homestead-gate-ledger-key`, read through
+  `/usr/bin/security` like the other entries, with the same limits; libsecret on Linux). With no
+  credential store, checkpoints are written unsigned and the gate says so; anchors still work.
+- **A keyed MAC on every new record.** The same key gives each new gate record an HMAC and a per-session
+  counter in its metadata. Rewriting a record without the key fails its MAC, and deleting a record from
+  the middle of a session leaves a gap in the counter, even if the chain hashes were recomputed. Older
+  records, written before this, verify exactly as before.
+- **Anchors off the machine.** Each checkpoint can also be written somewhere someone with your machine
+  can't rewrite later. A rebuilt chain can't match a head that was anchored before the rebuild.
+
+The gate never signs a chain that fails verification, fails a MAC, or does not extend every earlier
+checkpoint it can see. That includes the local files, the anchor folder, and the last head it sealed for
+this ledger, which it keeps in the credential store (entry `homestead-gate-ledger-head`). Checkpoint files
+can be deleted, but someone with only your files can't reach that keychain entry, so a rebuild that also
+strips every MAC and deletes the checkpoints is still refused. Without that rule, the gate's own automatic
+signing would launder a rebuild. A refusal goes in the brief and the notification, and `watch` exits 1.
+
+**Setting up anchors**, in the policy (`~/.homestead-gate/policy.toml`, or `policy.toml` in an assistant
+data dir):
+
+```toml
+[receipts]
+# A command that gets the checkpoint JSON on stdin ($HG_CHECKPOINT is the same JSON as a file,
+# $HG_CHECKPOINT_NAME a unique name). Here: commit it to a private repo and push to a remote whose
+# history you protect (no force-push, no deletes), so a copy leaves the machine at once.
+anchor_command = "cd ~/hg-anchors && cat > $HG_CHECKPOINT_NAME.json && git add -A && git commit -qm anchor && git push -q"
+# And/or a folder: a new file per checkpoint, never overwritten. The gate reads it back to check.
+anchor_dir = "/Volumes/ANCHORS/homestead"
+```
+
+An anchor is worth only what a later attacker can't change. Anything that can run code as you can
+delete files from a local folder, a mounted USB stick or a synced cloud folder. It forges nothing: it
+removes the anchors after the point it rewrote and keeps the earlier ones, and verification then only
+says that the newest records are not anchored yet. Good anchors are ones you can't rewrite from this
+machine either: a remote with protected history, an email to yourself, a timestamp authority (below),
+or a USB stick you unplug. A folder on the same disk is not an anchor. A synced cloud folder counts
+only as far as its version history keeps deleted files out of reach; check what yours keeps.
+
+**Trusted time (optional).** Timestamps come from the system clock, which someone with your machine can
+set. For time you don't have to trust, make `anchor_command` an RFC 3161 request to a public timestamp
+authority. The gate has no TSA client of its own and calls no service unless you configure one:
+
+```toml
+anchor_command = """
+d=~/hg-tsa; mkdir -p $d; cp "$HG_CHECKPOINT" $d/$HG_CHECKPOINT_NAME.json &&
+openssl ts -query -data $d/$HG_CHECKPOINT_NAME.json -sha256 -cert -out $d/$HG_CHECKPOINT_NAME.tsq &&
+curl -sf -H 'Content-Type: application/timestamp-query' --data-binary @$d/$HG_CHECKPOINT_NAME.tsq \
+  https://freetsa.org/tsr -o $d/$HG_CHECKPOINT_NAME.tsr
+"""
+```
+
+Check a stamp later with `openssl ts -verify -data NAME.json -in NAME.tsr -CAfile cacert.pem -untrusted tsa.crt`.
+Both certificates come from freetsa.org. The stamp proves the checkpoint, and so the head hash, existed by
+that time.
+
+**What an auditor gets:**
+
+- the ledger, a JSONL file at `<ledger>/.hsm/ledger.jsonl`, plus `checkpoints.jsonl`;
+- the anchored checkpoint files (`hg-checkpoint-*.json`), and any `.tsr` timestamp replies;
+- the signer's public key, which is in every checkpoint. Pin it with `--signer` once you have it from the
+  owner by another channel.
+
+They verify a copy with:
+
+```bash
+homestead-gate watch --ledger COPY --anchors ANCHOR_DIR --signer PUBKEY --no-checkpoint
+```
+
+That checks the chain, then every anchored checkpoint's signatures, then whether the copy still contains each
+anchored head. It reports the first anchored checkpoint the copy no longer matches and the last one it still
+does, which bounds where the history was rewritten. `--no-checkpoint` keeps it read-only: no key is created on
+the auditor's machine and nothing is written into the copy. The MACs are checked only on a machine that holds
+the key. Anywhere else, watch says they were not checked. Each anchored file also carries the
+`hsm-checkpoint v1 ...` line, so `hsm checkpoint --verify LINE COPY` works without homestead-gate.
+
+**Tamper-evident against whom:**
+
+| who | edits one record | rebuilds the whole log | deletes the newest records |
+|---|---|---|---|
+| someone with your files only (a copied disk, a backup, a shared folder), so no key | caught (chain, MAC) | caught. Rewritten records fail their MAC. With the MACs stripped, the chain still has to extend the head kept in the keychain, and anchored heads don't match | caught if those records were in a checkpoint (the keychain head) or an anchor |
+| someone running code as you | caught | caught back to the last anchor they can't change. **Not caught** for records no such anchor has seen: they can read the key and the keychain head from the credential store | the same |
+
+Anchors count only if this attacker can't modify them (see above).
+
+**What it still does not cover:**
+
+- **A compromised machine, before anchoring.** Anything that can run code as you can read the key
+  from the credential store and rewrite records that no anchor has seen yet. Anchors fix history from
+  the moment they are written; how much is exposed depends on how often you anchor.
+- **Time, without a TSA.** Without a timestamp authority, `ts` is the system clock. Order is still provable
+  from `seq`, the chain and the MAC counter, but wall-clock time is not.
+- **Record MACs don't bind the record's position.** homestead-memory assigns `seq`, `ts` and `prev_hash`
+  inside its own lock, so the MAC covers the content and the per-session counter, not those fields. Egress
+  denials from `homestead-gate run` are written without a MAC.
+- **A changed key.** If the keychain entry is lost, a new key is generated, and the keychain head goes with
+  it. Anchors signed by the old key still verify. `watch` notes the change, and `--signer` turns it into a
+  failure.
+- **Tested against fakes only.** The tests run the real `security -i` and `secret-tool` code paths against
+  a fake store. They never touch a real keychain.
+
 ### Threat model
 
 Who can attack, what they can do, and what stops them. "Outbound action" means anything that leaves your
@@ -649,7 +763,7 @@ machine on your behalf: an email, a message, a payment, a wallet transaction.
 | **A compromised cloud model** (the brain itself is hostile) | Propose any action, invent arguments, retry | Same gate, same rules: the brain has a submit function, not the gate. Denied actions can't be retried, a run gets 4 outbound actions, unknown tools are refused, extra fields are dropped | The brain can lie in its summary to you. Read the receipts, not the summary |
 | **A compromised or wrong local reviewer** | Approve something it should not | It is only one of two keys: anything flagged, anything not allowlisted, any calldata, any payment you never asked for, and any spend over the daily cap still needs you | A reviewer that approves an allowlisted, in-cap payment you did ask for, to the payee you named. That is the one path the policy lets through without you |
 | **Someone replaying an old approval** | Reuse a "yes" for a different action | Each approval is bound to the exact typed action and the policy version that judged it; a changed field is a new request | |
-| **Someone with your files** | Edit, delete or rebuild the receipt log | Every record holds the hash of the one before it, so an edit breaks the chain at that line (`homestead-gate watch` exits 1) | Deleting the newest records or rebuilding the whole log. Sign a checkpoint (`hsm checkpoint ~/.homestead-gate/ledger`) and keep it where they can't write |
+| **Someone with your files** | Edit, delete or rebuild the receipt log | Every record holds the hash of the one before it, so an edit breaks the chain at that line (`homestead-gate watch` exits 1). New records carry a MAC keyed from the OS keychain, checkpoints are signed automatically, and anchored checkpoints catch a rebuilt log (`watch --anchors DIR`) | Records nobody anchored yet, if they can also run code as you (the credential store gives them the key). [Receipts as audit evidence](#receipts-as-audit-evidence) |
 | **An agent going around the gate** | Use your SMTP password or a wallet key directly | `homestead-gate run` sandboxes the agent: it can reach the gate, the local model and the hosts you allow, and it can't read your SSH keys, cloud credentials or `.env` files. The gate holds the email credentials, not the agent | Anything sent to a host you allowed |
 
 How well it works, measured on outside benchmarks, is in [bench/agentdojo/RESULTS.md](bench/agentdojo/RESULTS.md):
@@ -709,10 +823,11 @@ assistant to pay bills and answer mail, and doesn't want one poisoned email to e
 - **Places the file rules don't name.** Claude Code rewrites `~/.claude.json` constantly, so it
   can't be locked, and it can register new MCP servers that start outside the sandbox next time.
   Check `claude mcp list` if something looks off.
-- **A rebuilt or shortened ledger.** The chain catches an edited record, but someone with your files
-  can rewrite the whole chain consistently, or delete the newest records, and `watch` still exits 0.
-  Run `hsm checkpoint ~/.homestead-gate/ledger` to sign its current state, and keep the signature
-  somewhere they can't reach. (Without the path, `hsm checkpoint` signs a different directory.)
+- **A rebuilt or shortened ledger, before it was anchored.** Signed checkpoints, record MACs and
+  anchors catch a rebuild by anyone without the key, and a rebuild of anything that was anchored where the
+  attacker can't write. Someone who can run code as you can still rewrite records that no such anchor has
+  seen. Without `[receipts]` anchors, only this machine's keychain can catch a rebuild, so an auditor
+  holding a copy can't. See [Receipts as audit evidence](#receipts-as-audit-evidence).
 - **Attacks GateBench doesn't cover.** 30 attacks, one step each, written by us. See the bench limits.
 
 MIT licensed.

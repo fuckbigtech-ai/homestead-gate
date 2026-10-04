@@ -595,7 +595,8 @@ class App:
             p = always_on.run_pass(
                 data, run.skill, llm=brain, reviewer=reviewer, now=at, guard_prompt=not unguarded,
                 max_steps=MAX_STEPS, log=lambda line: None, notify_fn=lambda t, m: shown.append(m) or True,
-                make_bot=make_bot, wrap_submit=lambda sub: self._submitter(s, run, sub, reviewer, {}))
+                make_bot=make_bot, wrap_submit=lambda sub: self._submitter(s, run, sub, reviewer, {}),
+                seal=False)          # throwaway per-visitor data: no keychain entry, no checkpoint
             bot = holder.get("bot")
             if bot is not None:
                 facts += [f for f in bot.facts_used if f not in facts]

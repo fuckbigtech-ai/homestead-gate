@@ -22,6 +22,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SEPOLIA = 11155111
+# Settings that are not rules about actions, so they stay out of `version`: the [receipts] anchors,
+# and the [lookup] switch, whose text goes only to the human and never changes a decision. Changing
+# them must not invalidate approvals or payload hashes (the policy receipt's file hash still moves).
+_NOT_RULES = frozenset({"anchor_dir", "anchor_command", "lookup_tavily"})
 
 
 SPEND_WORDS = re.compile(r"\b(pay|pays|paid|payment|payments|invoices?|bills?|tip|tips|reimburse\w*|refund\w*|transfer\w*|wire|settle)\b|\bsend\b[^.\n]{0,40}(\$\s?\d|\d[\d.,]*\s?(eth|usdc|usdt|usd|dollars?|cad)\b)", re.I)
@@ -63,6 +67,10 @@ class Policy:
     # Dual control: action types that need a second, named approver's passphrase after the first yes.
     # [approval] second_approver = true means every type; dual_control = ["wallet_tx"] names some.
     dual_control: list[str] = field(default_factory=list)
+    # [receipts]: where checkpoints are anchored off this machine. Not rules about actions, so they
+    # are left out of `version` (an anchor change must not invalidate approvals or payload hashes).
+    anchor_dir: str = ""
+    anchor_command: str = ""
     # Where this policy came from and the sha256 of the exact bytes parsed. Underscored, so the rule
     # hash (version) does not move when only the comments in the file change; the receipts carry both.
     _path: Path | None = field(default=None, repr=False)
@@ -78,6 +86,7 @@ class Policy:
         u, e, v = d.get("user", {}), d.get("email", {}), d.get("evm", {})
         lim, rv, ap = d.get("limits", {}), d.get("review", {}), d.get("approval", {})
         lk = d.get("lookup", {})
+        rc = d.get("receipts", {})
         p = cls(
             user_email=u.get("email", ""), user_wallet=u.get("wallet", ""),
             email_allow=list(e.get("allow", [])), evm_allow=list(v.get("allow", [])),
@@ -93,6 +102,7 @@ class Policy:
             lookup_tavily=lk.get("tavily", False) is True,
             dual_control=_dual_control(ap),
             _path=Path(path).expanduser().resolve(), _file_sha256=hashlib.sha256(raw).hexdigest(),
+            anchor_dir=str(rc.get("anchor_dir", "")), anchor_command=str(rc.get("anchor_command", "")),
         )
         if p.chain_id != SEPOLIA:
             # v1 is testnet only. Refusing to load beats a mainnet transaction nobody meant.
@@ -104,7 +114,7 @@ class Policy:
         """Short hash of every rule. Recorded with each decision so an approval given under one
         set of rules is never mistaken for one given under another (u/arthaudm, 2026-09-30:
         "include the policy version so a changed rule can't reuse an old approval")."""
-        rules = {k: v for k, v in sorted(vars(self).items()) if not k.startswith("_")}
+        rules = {k: v for k, v in sorted(vars(self).items()) if not k.startswith("_") and k not in _NOT_RULES}
         if not rules["dual_control"]:
             del rules["dual_control"]       # policies written before dual control keep their version
         return hashlib.sha256(json.dumps(rules, sort_keys=True, default=str).encode()).hexdigest()[:16]
