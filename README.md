@@ -34,6 +34,8 @@ yes. The cloud does the thinking. Your machine has the veto. The cloud can't vot
   runs; edit one record and `homestead-gate watch` shows the line where the chain breaks. Limit: anyone with
   your user's access can rebuild the whole chain; export signed checkpoints off the machine
   (`hsm checkpoint --export`) if you need evidence that survives that.
+- **Your data:** what Nebius Token Factory and (optionally) Tavily receive, and what their terms say about
+  training, retention and region: [Data and vendors](#data-and-vendors).
 - **v1 scope:** payments are unsigned Sepolia testnet transactions and email is a dry run unless you set up
   live sending. No real money moves.
 
@@ -314,6 +316,65 @@ after an hour. Runs are rate limited (5 per page and 10 in total per hour by def
 and a hijack run each count as two) with a token budget per run. Email is never sent and payments are unsigned. It is
 hosted on Modal with `demo/web/modal_app.py` (live at the link at the top).
 
+
+## Data and vendors
+
+homestead uses two outside services. This section says what each one gets, what its published terms say, and how to avoid it. We checked these terms on 2026-10-04 from the vendors' own pages. Terms change, so read the linked pages yourself before you rely on them.
+
+### What stays on your machine
+
+- The gate, the policy, your receipts and the ledger.
+- The reviewer model. By default it runs on your machine through Ollama.
+- Your memory facts, skills and the read-only copy of your mail, until the assistant reads them into a prompt (see below).
+- Your email and wallet credentials. The gate holds them, not the agent, and they are never sent to a model.
+
+### Nebius Token Factory (the cloud brain)
+
+What it gets. When you run `homestead-gate assistant`, the brain (Nemotron 3 Super) runs on Nebius Token Factory. It receives your request; the sender, subject and date of emails in the inbox; the full text of any email it opens; and any memory facts it looks up. On the hosted web demo, the reviewer (Nemotron Nano 30B) also runs on Token Factory. It receives the proposed action and what the agent read. In the product the reviewer runs on your machine.
+
+What their terms say:
+
+- Training. By default, Nebius stores your prompts and outputs and uses them to train small "draft" models for speculative decoding, a technique that makes inference faster. Their [Terms of Service, section 7](https://docs.tokenfactory.nebius.com/legal/terms-of-service) say this. Their [Legal Quick Guide](https://docs.tokenfactory.nebius.com/legal/legal-quick-guide) says your content is not used to train models, but it also says the Terms prevail if the two disagree. With Zero Data Retention (ZDR) turned on, both documents say nothing is stored and nothing is used for training.
+- Retention. Without ZDR, stored prompts and outputs are kept in Finland. We found no stated retention period. With ZDR, prompts and responses are "not stored on our systems after each request is processed". ZDR is an organization-wide setting in your Token Factory account.
+- Region. Public endpoints, which homestead uses by default, have no fixed region. Nebius says the region can change without notice. On the day we checked, Nemotron 3 Super was listed in us-central1. Nebius's [sub-processor list](https://docs.nebius.com/legal/sub-processors_tofa) includes third-party GPU clouds in the US, Iceland and Canada. A fixed region is a contract term only for dedicated endpoints (paid, reserved capacity).
+- Contract. The [DPA](https://docs.nebius.com/legal/dpa) is part of the Terms. It includes EU Standard Contractual Clauses, 15 days' notice of new sub-processors, deletion or return of data at the end of the contract, and breach notice "without undue delay". You own your inputs and outputs. Nebius claims ISO 27001, ISO 27701 and SOC 2 Type II ([Trust Center](https://nebius.com/trust-center)).
+
+Our setup. The hosted demo and our own runs use a Nebius account owned by Kinetic Labs Inc. If you use the hosted demo, what you type is covered by that account's settings, not yours. We have not yet published written confirmation from Nebius of that account's ZDR status.
+
+How to reduce or avoid it:
+
+- Turn on Zero Data Retention in your own Token Factory account before you point homestead at real mail.
+- For a fixed region, deploy the model on a Token Factory dedicated endpoint and set `HG_TOKENFACTORY_BASE_URL` and `HG_TOKENFACTORY_MODEL`.
+- To avoid Nebius completely: `--backend nim` sends the brain's traffic to NVIDIA instead. That is a different vendor, and we have not reviewed its terms. `--base-url` can in principle point at an OpenAI-compatible server you run yourself. We have not tested a local brain, and tool-calling quality on small local models is unknown.
+- To avoid any cloud model, do not run the assistant. The gate on its own (`homestead-gate up`) uses only the local reviewer.
+
+### Tavily (optional web lookup)
+
+What it gets. Nothing, unless you turn it on (`[lookup] tavily = true` plus a key in your OS credential store). When it is on, it gets only the recipient's domain (for `billing@mail.example.com`, that is `example.com`) or a wallet address, inside a fixed search query. It never gets the local part of the address, the subject, the body or your name. Your own address, your allowlist and saved contacts are never looked up.
+
+What their terms say:
+
+- The [Terms of Service, section 9.2](https://www.tavily.com/terms) give Tavily a perpetual, irrevocable license to use what you send, including to improve its services. Section 6.5 allows training on input to its AI features. It is unclear to us whether a plain search call like ours counts as one of those features.
+- The [Privacy Policy](https://www.tavily.com/privacy) says query data is kept while you have an account or until you ask for deletion. It also says queries may be passed to third-party search indexes such as Google.
+- Tavily's docs say "zero data retention", but we could not find that in its Terms or Privacy Policy.
+- Processing is in the United States ([sub-processors](https://trust.tavily.com/subprocessors)). Its DPA is available only on request. Tavily claims SOC 2 Type II and ISO 27001 ([Trust Center](https://trust.tavily.com/)). Tavily is now owned by Nebius.
+
+How to avoid it: leave `[lookup] tavily = false`, which is the default. For the web demo, do not set `TAVILY_API_KEY`. When the lookup is off, the approval card shows nothing about it, and the gate makes the same decision either way.
+
+### Other services in the demo path
+
+The hosted web demo runs on Modal, which serves the page and sees demo traffic. We have not reviewed Modal's terms.
+
+### What we have not verified
+
+- How long Nebius keeps prompts and outputs when ZDR is off.
+- Whether ZDR also covers Nebius's request logs, metadata and error telemetry.
+- Whether Nebius has deleted, or will delete, draft models already trained on an account's data once ZDR is turned on.
+- Which Nebius certifications cover Token Factory specifically, as opposed to Nebius's other cloud products.
+- Whether either vendor's terms address Canada's PIPEDA. We found no mention of it.
+- A breach notification timeframe for Tavily, or a fixed hour count for Nebius.
+- Whether Tavily's training clause applies to the search calls homestead makes.
+- The terms of NVIDIA (the `nim` backend) and Modal (demo hosting).
 
 ## The gate
 
