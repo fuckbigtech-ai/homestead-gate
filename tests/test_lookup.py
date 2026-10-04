@@ -329,3 +329,23 @@ def test_from_env():
     assert lookup.from_env({}) is None
     assert lookup.from_env({"TAVILY_API_KEY": "  "}) is None
     assert isinstance(lookup.from_env({"TAVILY_API_KEY": KEY}), lookup.TavilyLookup)
+
+
+def test_web_text_shown_above_the_reviewer_flag(tmp_path):
+    rec = Recorder()
+    g, _ = gate(tmp_path, FakeTavily(), approver=rec, verdict="block")
+    g.submit(email())
+    flag = next(i for i, l in enumerate(rec.lines) if l.startswith("  !! reviewer FLAGGED"))
+    web = [i for i, l in enumerate(rec.lines) if l.startswith("  web:") or l.startswith("    ")
+           and MARKER in l]
+    assert web and max(web) < flag          # the trusted signal sits next to the question
+
+
+def test_cache_shared_across_gates_of_one_session(tmp_path):
+    t, cache = FakeTavily(), {}
+    for i in range(2):
+        g = Gate(policy=Policy(user_email=ME), reviewer=FakeReviewer(), approver=Recorder(),
+                 ledger_dir=tmp_path / "l", task="t", session=str(i), outbox=tmp_path / "o",
+                 lookup=lookup.TavilyLookup(KEY, transport=t), lookup_cache=cache)
+        g.submit(email())
+    assert len(t.requests) == 1

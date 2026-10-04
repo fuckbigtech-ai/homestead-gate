@@ -381,10 +381,11 @@ function onApproval(d) {
   const timer = el("span", "timer");
   head.append(el("span", "card-title", `Approval needed: ${describeAction(d.action)}`), timer);
   card.append(head, actionList(d.action, d.to_label));
-  card.append(reviewBlock(d.verdict || (d.flagged ? "block" : "approve"), d.review_reason, d.span, d.reviewer_model));
-  card.append(ruleBlock(d.rule));
+  // Untrusted web text above the reviewer's verdict, so the trusted signal sits next to the buttons.
   const lookup = lookupBlock(d.web_lookup);
   if (lookup) card.append(lookup);
+  card.append(reviewBlock(d.verdict || (d.flagged ? "block" : "approve"), d.review_reason, d.span, d.reviewer_model));
+  card.append(ruleBlock(d.rule));
   const receipts = receiptBlock(d.receipts);
   card.append(receipts);
 

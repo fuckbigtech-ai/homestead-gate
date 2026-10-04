@@ -79,12 +79,13 @@ def describe(action: dict) -> str:
 class Gate:
     def __init__(self, *, policy: Policy, reviewer: Reviewer, approver: Approver, ledger_dir: Path,
                  task: str, session: str, outbox: Path, smtp: dict | None = None, live: bool = False,
-                 lookup: "web_lookup.TavilyLookup | None" = None):
+                 lookup: "web_lookup.TavilyLookup | None" = None, lookup_cache: dict | None = None):
         self.policy, self.reviewer, self.approver = policy, reviewer, approver
         # Optional web lookup of unknown recipients (lookup.py). None means off. Its results are
-        # for the human only; see _recipient_context.
+        # for the human only; see _recipient_context. The cache is per target for the session; a
+        # caller that builds several gates for one session (web demo runs, held items) passes one dict.
         self.lookup = lookup
-        self._lookup_cache: dict[tuple[str, str], web_lookup.LookupResult] = {}   # per target, per session
+        self._lookup_cache: dict = {} if lookup_cache is None else lookup_cache
         self.ledger_dir, self.task, self.session = Path(ledger_dir), task, session
         self.outbox, self.smtp, self.live = Path(outbox), smtp, live
         # payload hashes refused in this session (denied, blocked or unanswered). An identical retry is

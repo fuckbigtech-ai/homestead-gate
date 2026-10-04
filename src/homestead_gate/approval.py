@@ -86,6 +86,8 @@ class TerminalApprover:
                 if len(lines) > BODY_LINES:
                     hidden = sum(len(x) + 1 for x in lines[BODY_LINES:])
                     self.out(f"    (+{len(lines) - BODY_LINES} more lines, {hidden} characters not shown)")
+            # Web text first: the reviewer's verdict, the trusted signal, stays next to the question.
+            self._show_lookup((context or {}).get("web_lookup"))
             if flagged and review_reason.startswith(NO_MODEL_REASON):
                 self.out(f"  -- {clean(review_reason)}")
             elif flagged:
@@ -94,7 +96,6 @@ class TerminalApprover:
                     self.out(f"  !! suspicious text: {clean(span[:200])}")
             else:
                 self.out(f"  reviewer: ok ({clean(review_reason)})")
-            self._show_lookup((context or {}).get("web_lookup"))
 
             ans = self.input("approve? [y/N] ", left())
             if ans is None:

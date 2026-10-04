@@ -156,6 +156,7 @@ class Session:
         self.window = Window(runs_per_hour)
         self.runs: dict[str, Run] = {}
         self.active: Run | None = None
+        self.lookup_cache: dict = {}         # web lookups, per target, for this visitor's session only
 
     @property
     def ledger_dir(self) -> Path:
@@ -274,7 +275,7 @@ class App:
                  lookup_factory=None):
         self.root = Path(root or tempfile.mkdtemp(prefix="hg-web-demo-")).resolve()
         # Web lookup of unknown recipients (homestead_gate.lookup): on only if TAVILY_API_KEY is set
-        # (locally, or by the Modal secret). Each gate gets its own cache, so sessions share nothing.
+        # (locally, or by the Modal secret). The cache lives on each Session, so sessions share nothing.
         self.lookup_factory = lookup_factory or (lambda: web_lookup.from_env(os.environ))
         self.root.mkdir(parents=True, exist_ok=True)
         self.clock = clock
@@ -537,7 +538,7 @@ class App:
         asst.replay_auto_spend(policy, s.ledger_dir)
         gate = Gate(policy=policy, reviewer=reviewer, approver=approver, ledger_dir=s.ledger_dir,
                     task=run.task, session=run.id, outbox=data / "outbox", smtp=None, live=False,
-                    lookup=self.lookup_factory())
+                    lookup=self.lookup_factory(), lookup_cache=s.lookup_cache)
         run.emit("start", self._start_info(run, unguarded, injection, brain, reviewer))
         bot = WebAssistant(llm=brain, submit=self._submitter(s, run, gate.submit, reviewer, rules), data_dir=data,
                            memory=asst.AssistantMemory(data / "memory"), task=run.task, max_steps=MAX_STEPS,

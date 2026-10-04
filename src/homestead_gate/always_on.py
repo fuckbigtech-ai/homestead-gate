@@ -112,6 +112,7 @@ def resolve_pending(data: Path, *, policy_factory: Callable[[], object], reviewe
     [{"item", "result"}]."""
     data = Path(data)
     out, keep = [], []
+    lookup_cache: dict = {}                  # one web-lookup cache for this sitting, across items
     saved = {f["value"].lower() for f in asst.AssistantMemory(data / "memory").user_facts("wallet")}
     for item in load_pending(data):
         action = item.get("action") or {}
@@ -125,7 +126,7 @@ def resolve_pending(data: Path, *, policy_factory: Callable[[], object], reviewe
         asst.replay_auto_spend(policy, data / "ledger")
         gate = Gate(policy=policy, reviewer=reviewer, approver=approver, ledger_dir=data / "ledger",
                     task=str(item.get("task", "")), session=secrets.token_hex(4), outbox=data / "outbox",
-                    lookup=lookup)
+                    lookup=lookup, lookup_cache=lookup_cache)
         log(f"held {item.get('created', '?')} by skill {item.get('skill', '?')}: "
             f"{_what(item.get('action') or {})}")
         res = gate.submit({"action": item.get("action") or {}, "read": item.get("reads") or []})
