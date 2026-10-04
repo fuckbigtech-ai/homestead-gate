@@ -334,14 +334,14 @@ class GatedToolsExecutor(ToolsExecutor):
                                      {"type": "tool_call", "tool": call.function, "args": dict(call.args)},
                                      named=named)
             USAGE.event(f"gate_{verdict}")
-            asked, human_ok = False, False
+            asked, human_ok, benign = False, False, oracle_human(call)     # one oracle call per tool call
             if verdict != "approve" and self.human == "oracle":
-                asked, human_ok = True, oracle_human(call)
+                asked, human_ok = True, benign
             self.log.append({"tool": call.function, "verdict": verdict, "reason": reason,
                              "human_asked": asked, "human_approved": human_ok,
                              "secs": round(time.time() - t, 2),
                              "user_task": CURRENT.get("user_task"), "injection_task": CURRENT.get("injection_task"),
-                             "args": dict(call.args), "attacker": not oracle_human(call), **LAST_REVIEW})
+                             "args": dict(call.args), "attacker": not benign, **LAST_REVIEW})
             LAST_REVIEW.clear()
             if GATE_LOG["path"]:
                 with open(GATE_LOG["path"], "a") as f:

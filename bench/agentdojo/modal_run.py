@@ -56,21 +56,32 @@ NEMO_COMMON = ["--agent", SUPER, "--agent-backend", "tokenfactory", "--agent-sys
 NEMO_SETTINGS = {"nogate": [], "gate": ["--gate", NANO, "--gate-backend", "tokenfactory", "--human", "none"]}
 
 
-def _ollama_up():
+PULL_TRIES, PULL_WAIT_S = 8, 60     # the registry sometimes 524s and says retry later; one policy everywhere
+
+
+def _serve_and_pull(model: str, log: str = "/tmp/ollama.log", keep_alive: str = "60m",
+                    drop_parallel: bool = False) -> None:
+    """Start `ollama serve` (16k context), wait until it answers, then pull `model` with retries."""
     import os, subprocess, time, urllib.request
-    env = dict(os.environ, OLLAMA_CONTEXT_LENGTH="16384", OLLAMA_KEEP_ALIVE="60m")
-    subprocess.Popen("ollama serve > /tmp/ollama.log 2>&1", shell=True, env=env)
+    env = dict(os.environ, OLLAMA_CONTEXT_LENGTH="16384", OLLAMA_KEEP_ALIVE=keep_alive)
+    if drop_parallel:
+        env.pop("OLLAMA_NUM_PARALLEL", None)
+    subprocess.Popen(f"ollama serve > {log} 2>&1", shell=True, env=env)
     for _ in range(60):
         try:
             urllib.request.urlopen("http://127.0.0.1:11434/api/version", timeout=2); break
         except Exception:
             time.sleep(2)
-    for _ in range(8):                      # the registry sometimes 524s; it says retry later
-        if subprocess.run(f"ollama pull {MODEL}", shell=True).returncode == 0:
-            break
-        time.sleep(150)
-    else:
-        raise SystemExit(f"could not pull {MODEL}")
+    for _ in range(PULL_TRIES):
+        if subprocess.run(f"ollama pull {model}", shell=True).returncode == 0:
+            return
+        time.sleep(PULL_WAIT_S)
+    raise SystemExit(f"could not pull {model}")
+
+
+def _ollama_up():
+    import os, subprocess, time, urllib.request
+    _serve_and_pull(MODEL, log="/tmp/ollama.log", keep_alive="60m")
     Path("/tmp/Modelfile").write_text(f"FROM {MODEL}\nPARAMETER num_ctx 16384\nPARAMETER temperature 0\n")
     subprocess.run(f"ollama create {AGENT} -f /tmp/Modelfile", shell=True, check=True)
 
@@ -172,19 +183,7 @@ def run_local_gate(suite: str, gate_model: str, user_tasks: list[str], cost_cap:
     import os, subprocess, time, urllib.request
     root = f"/results/{prefix}/{suite}"
     Path(root).mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, OLLAMA_CONTEXT_LENGTH="16384", OLLAMA_KEEP_ALIVE="120m")
-    subprocess.Popen(f"ollama serve > {root}/ollama.log 2>&1", shell=True, env=env)
-    for _ in range(60):
-        try:
-            urllib.request.urlopen("http://127.0.0.1:11434/api/version", timeout=2); break
-        except Exception:
-            time.sleep(2)
-    for _ in range(6):
-        if subprocess.run(f"ollama pull {gate_model}", shell=True).returncode == 0:
-            break
-        time.sleep(60)
-    else:
-        raise SystemExit(f"could not pull {gate_model}")
+    _serve_and_pull(gate_model, log=f"{root}/ollama.log", keep_alive="120m")
     sh = lambda c: subprocess.run(c, shell=True, capture_output=True, text=True).stdout
     info = {"ollama": sh("ollama --version").strip(), "gpu": sh("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader").strip(),
             "gate_model": gate_model, "list": sh("ollama list"), "show": sh(f"ollama show {gate_model}"),
@@ -266,19 +265,7 @@ def replay_items(items: list, prompt: str) -> dict:
     with a 16k context. No traces needed in the container."""
     import os, subprocess, time, urllib.request
     t0 = time.time()
-    env = dict(os.environ, OLLAMA_CONTEXT_LENGTH="16384", OLLAMA_KEEP_ALIVE="60m")
-    subprocess.Popen("ollama serve > /tmp/ollama.log 2>&1", shell=True, env=env)
-    for _ in range(60):
-        try:
-            urllib.request.urlopen("http://127.0.0.1:11434/api/version", timeout=2); break
-        except Exception:
-            time.sleep(2)
-    for _ in range(4):
-        if subprocess.run(f"ollama pull {NANO4B_GGUF}", shell=True).returncode == 0:
-            break
-        time.sleep(60)
-    else:
-        raise SystemExit(f"could not pull {NANO4B_GGUF}")
+    _serve_and_pull(NANO4B_GGUF, log="/tmp/ollama.log", keep_alive="60m")
     subprocess.run(f"ollama cp {NANO4B_GGUF} {NANO4B}", shell=True, check=True)
     meta = {"ollama": subprocess.run("ollama --version", shell=True, capture_output=True, text=True).stdout.strip(),
             "blobs": sorted(p.name for p in Path("/root/.ollama/models/blobs").iterdir())}
@@ -309,20 +296,7 @@ def _replay_think(items: list, which: str, modes: list[str], probe: int, gpu: st
     t0 = time.time()
     pull, name, blob = THINK_MODELS[which]
     sh = lambda c: subprocess.run(c, shell=True, capture_output=True, text=True).stdout
-    env = dict(os.environ, OLLAMA_CONTEXT_LENGTH="16384", OLLAMA_KEEP_ALIVE="120m")
-    env.pop("OLLAMA_NUM_PARALLEL", None)
-    subprocess.Popen("ollama serve > /tmp/ollama.log 2>&1", shell=True, env=env)
-    for _ in range(60):
-        try:
-            urllib.request.urlopen("http://127.0.0.1:11434/api/version", timeout=2); break
-        except Exception:
-            time.sleep(2)
-    for _ in range(4):
-        if subprocess.run(f"ollama pull {pull}", shell=True).returncode == 0:
-            break
-        time.sleep(60)
-    else:
-        raise SystemExit(f"could not pull {pull}")
+    _serve_and_pull(pull, log="/tmp/ollama.log", keep_alive="120m", drop_parallel=True)
     if name != pull:
         subprocess.run(f"ollama cp {pull} {name}", shell=True, check=True)
     blobs = sorted(p.name for p in Path("/root/.ollama/models/blobs").iterdir())
@@ -411,20 +385,7 @@ def _local4b(suite: str, user_tasks: list[str], modes: list[str], lanes: int, co
     for r in roots.values():
         Path(r).mkdir(parents=True, exist_ok=True)
     log0 = f"{roots[modes[0]]}/ollama.log"
-    env = dict(os.environ, OLLAMA_CONTEXT_LENGTH="16384", OLLAMA_KEEP_ALIVE="180m")
-    env.pop("OLLAMA_NUM_PARALLEL", None)
-    subprocess.Popen(f"ollama serve > {log0} 2>&1", shell=True, env=env)
-    for _ in range(60):
-        try:
-            urllib.request.urlopen("http://127.0.0.1:11434/api/version", timeout=2); break
-        except Exception:
-            time.sleep(2)
-    for _ in range(4):
-        if subprocess.run(f"ollama pull {NANO4B_GGUF}", shell=True).returncode == 0:
-            break
-        time.sleep(60)
-    else:
-        raise SystemExit(f"could not pull {NANO4B_GGUF}")
+    _serve_and_pull(NANO4B_GGUF, log=log0, keep_alive="180m", drop_parallel=True)
     subprocess.run(f"ollama cp {NANO4B_GGUF} {NANO4B}", shell=True, check=True)
     sh = lambda c: subprocess.run(c, shell=True, capture_output=True, text=True).stdout
     blobs = sorted(p.name for p in Path("/root/.ollama/models/blobs").iterdir())
