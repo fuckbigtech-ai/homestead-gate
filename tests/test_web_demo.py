@@ -192,7 +192,7 @@ def test_web_lookup_off_without_key(tmp_path):
     s = app.session(None)
     run = app.start_run(s, "summarize", unguarded=True, background=False)
     card = next(e["data"] for e in run.events if e["type"] == "approval")
-    assert card["web_lookup"]["ok"] is False and "unavailable" in card["web_lookup"]["label"]
+    assert card.get("web_lookup") is None                     # off: the card says nothing about lookups
 
 
 def test_page_renders_web_lookup_as_text_only():

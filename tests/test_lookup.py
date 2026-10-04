@@ -283,8 +283,7 @@ def test_disabled_by_default(tmp_path):
     rec = Recorder()
     g, _ = gate(tmp_path, None, approver=rec)
     g.submit(email())
-    assert rec.contexts[0]["web_lookup"] == lookup.unavailable("domain", "mail-protect.example",
-                                                               "not configured").card()
+    assert not (rec.contexts[0] or {}).get("web_lookup")      # off: no lookup line on the card at all
     assert not [r for r in ledger.read_all(tmp_path / "l") if r["action"] == "gate.lookup"]
 
 
@@ -349,3 +348,10 @@ def test_cache_shared_across_gates_of_one_session(tmp_path):
                  lookup=lookup.TavilyLookup(KEY, transport=t), lookup_cache=cache)
         g.submit(email())
     assert len(t.requests) == 1
+
+
+def test_shared_mail_providers_are_never_looked_up_and_never_mark_the_provider_known():
+    p = Policy(user_email="me@gmail.com", email_allow=["sam@gmail.com", "ops@rivera-plumbing.example"])
+    assert lookup.is_known({"type": "email", "to": "stranger@gmail.com"}, p)          # provider: nothing to learn
+    assert lookup.is_known({"type": "email", "to": "billing@rivera-plumbing.example"}, p)
+    assert not lookup.is_known({"type": "email", "to": "backup@mail-protect.example"}, p)

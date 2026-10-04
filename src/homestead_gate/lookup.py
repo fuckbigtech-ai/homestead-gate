@@ -80,9 +80,16 @@ def target_of(action: dict) -> tuple[str, str] | None:
     return "domain", registrable(host)
 
 
+# Shared mail providers: a web search for "gmail.com" says nothing about who is writing, so these are
+# never looked up, and a contact on one of them does not mark the whole provider as known.
+FREE_MAIL = {"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com", "yahoo.com",
+             "icloud.com", "me.com", "mac.com", "aol.com", "proton.me", "protonmail.com", "gmx.com", "gmx.de",
+             "yandex.com", "mail.com", "zoho.com", "fastmail.com", "hey.com"}
+
+
 def is_known(action: dict, policy) -> bool:
-    """Known contacts are never looked up: yourself, your allowlist (which includes the contacts you
-    wrote into memory), or an email domain that is yours or one of theirs."""
+    """Not looked up: yourself, your allowlist (which includes the contacts you wrote into memory), an
+    email domain that is yours or one of theirs (company domains only), and shared mail providers."""
     if policy.is_self(action) or policy.is_allowlisted(action):
         return True
     if action.get("type") != "email":
@@ -91,7 +98,9 @@ def is_known(action: dict, policy) -> bool:
     if t is None:
         return False
     mine = [policy.user_email] + list(policy.email_allow)
-    domains = {registrable(a.rsplit("@", 1)[1].lower()) for a in mine if a and "@" in a}
+    if t[1] in FREE_MAIL:
+        return True
+    domains = {registrable(a.rsplit("@", 1)[1].lower()) for a in mine if a and "@" in a} - FREE_MAIL
     return t[1] in domains
 
 

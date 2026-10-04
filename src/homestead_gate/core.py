@@ -116,7 +116,7 @@ class Gate:
         t = web_lookup.target_of(action)
         kind, target = t if t else ("domain" if action.get("type") == "email" else "wallet", "")
         if self.lookup is None:
-            return {"web_lookup": web_lookup.unavailable(kind, target, "not configured").card()}
+            return None                      # off: the card shows nothing about lookups at all
         if t is None:
             return {"web_lookup": web_lookup.unavailable(kind, target,
                                                          "recipient is not one clean address").card()}
