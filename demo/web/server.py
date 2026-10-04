@@ -623,11 +623,12 @@ class App:
         return {"fact": fact_view(fact)}
 
     # -- page actions
-    def decide(self, s: Session, run_id: str, rid: str, decision: str, phrase: str = "") -> tuple[bool, str]:
+    def decide(self, s: Session, run_id: str, rid: str, decision: str, phrase: str = "",
+               viewed: bool = False) -> tuple[bool, str]:
         run = s.runs.get(str(run_id))          # only this session's runs are reachable
         if run is None or run.approver is None:
             return False, "no approval is waiting with that id"
-        return run.approver.decide(str(rid), str(decision), str(phrase or ""))
+        return run.approver.decide(str(rid), str(decision), str(phrase or ""), viewed=viewed is True)
 
     def verify(self, s: Session) -> dict:
         return _verify_dir(s.ledger_dir)
@@ -814,7 +815,7 @@ def make_handler(app: App):
                     return self._json(404, {"error": "no session"})
                 if path == "/api/decide":
                     ok, msg = app.decide(s, d.get("run_id", ""), d.get("rid", ""), d.get("decision", ""),
-                                         d.get("phrase", ""))
+                                         d.get("phrase", ""), viewed=d.get("viewed") is True)
                     return self._json(200 if ok else 409, {"ok": ok, "message": msg})
                 if path == "/api/tamper":
                     return self._json(200, app.tamper(s))

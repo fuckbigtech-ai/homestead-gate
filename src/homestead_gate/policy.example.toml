@@ -26,3 +26,7 @@ timeout_s = 120
 [approval]
 override_delay_s = 60      # wait before you can approve something the model flagged
 timeout_s = 300            # unanswered requests expire and are not executed
+# Dual control (off by default): after your yes, a second named person types their passphrase.
+# Register them first with `homestead-gate approver add NAME` (they type it; only a salted hash is kept).
+# second_approver = true     # every action type
+# dual_control = ["wallet_tx"]   # or only these types

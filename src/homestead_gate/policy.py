@@ -27,6 +27,16 @@ SEPOLIA = 11155111
 SPEND_WORDS = re.compile(r"\b(pay|pays|paid|payment|payments|invoices?|bills?|tip|tips|reimburse\w*|refund\w*|transfer\w*|wire|settle)\b|\bsend\b[^.\n]{0,40}(\$\s?\d|\d[\d.,]*\s?(eth|usdc|usdt|usd|dollars?|cad)\b)", re.I)
 
 
+def _dual_control(ap: dict) -> list[str]:
+    kinds = ap.get("dual_control", [])
+    if isinstance(kinds, str) or not isinstance(kinds, list) or not all(isinstance(k, str) for k in kinds):
+        raise ValueError("[approval] dual_control must be a list of action types, e.g. [\"wallet_tx\"]")
+    out = sorted(set(kinds))
+    if bool(ap.get("second_approver", False)):
+        out = ["*"]
+    return out
+
+
 @dataclass
 class Policy:
     user_email: str = ""
@@ -47,13 +57,21 @@ class Policy:
     review_think: bool = False       # [review] think = true: the reviewer reasons first (slower, fewer false blocks)
     override_delay_s: float = 60
     approval_timeout_s: float = 300
+    # Dual control: action types that need a second, named approver's passphrase after the first yes.
+    # [approval] second_approver = true means every type; dual_control = ["wallet_tx"] names some.
+    dual_control: list[str] = field(default_factory=list)
+    # Where this policy came from and the sha256 of the exact bytes parsed. Underscored, so the rule
+    # hash (version) does not move when only the comments in the file change; the receipts carry both.
+    _path: Path | None = field(default=None, repr=False)
+    _file_sha256: str | None = field(default=None, repr=False)
     _recent: deque = field(default_factory=deque, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _auto_spent: deque = field(default_factory=deque, repr=False)   # (time, eth) auto-approved in 24h
 
     @classmethod
     def load(cls, path: str | Path) -> "Policy":
-        d = tomllib.loads(Path(path).read_text())
+        raw = Path(path).read_bytes()
+        d = tomllib.loads(raw.decode())
         u, e, v = d.get("user", {}), d.get("email", {}), d.get("evm", {})
         lim, rv, ap = d.get("limits", {}), d.get("review", {}), d.get("approval", {})
         p = cls(
@@ -68,6 +86,8 @@ class Policy:
             review_timeout_s=float(rv.get("timeout_s", 120)), review_think=bool(rv.get("think", False)),
             override_delay_s=float(ap.get("override_delay_s", 60)),
             approval_timeout_s=float(ap.get("timeout_s", 300)),
+            dual_control=_dual_control(ap),
+            _path=Path(path).expanduser().resolve(), _file_sha256=hashlib.sha256(raw).hexdigest(),
         )
         if p.chain_id != SEPOLIA:
             # v1 is testnet only. Refusing to load beats a mainnet transaction nobody meant.
@@ -80,7 +100,26 @@ class Policy:
         set of rules is never mistaken for one given under another (u/arthaudm, 2026-09-30:
         "include the policy version so a changed rule can't reuse an old approval")."""
         rules = {k: v for k, v in sorted(vars(self).items()) if not k.startswith("_")}
+        if not rules["dual_control"]:
+            del rules["dual_control"]       # policies written before dual control keep their version
         return hashlib.sha256(json.dumps(rules, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+    @property
+    def file_sha256(self) -> str | None:
+        """sha256 of the policy file as loaded; None for a policy built in code (tests, demos)."""
+        return self._file_sha256
+
+    @property
+    def path(self) -> Path | None:
+        return self._path
+
+    @property
+    def approvers_dir(self) -> Path | None:
+        """Where `homestead-gate approver add` keeps the second approvers: next to the policy file."""
+        return self._path.parent if self._path else None
+
+    def requires_dual_control(self, action: dict) -> bool:
+        return "*" in self.dual_control or action.get("type") in self.dual_control
 
     @property
     def identity(self) -> str:
