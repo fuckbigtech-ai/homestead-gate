@@ -82,8 +82,8 @@ MEASURED = {m_digest: m for m_digest, m in (
     ("sha256:dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c", Measured(
         "qwen3.5:9b",
         "Qwen 3.5 9B, Ollama library qwen3.5:9b",
-        "AgentDojo Qwen 3.5 9B banking and Slack runs (Kaggle, 2026-09-30); GateBench Modal re-runs. "
-        "The GateBench M3 Pro run did not record its blob",
+        "AgentDojo Qwen 3.5 9B banking and Slack runs, prompt v1 (Kaggle, 2026-09-30); also the GateBench "
+        "runs of candidate prompts v3/v4 (not shipped). The GateBench M3 Pro run did not record its blob",
         "bench/agentdojo/RESULTS.md#homestead-gate-on-agentdojo")),
 )}
 

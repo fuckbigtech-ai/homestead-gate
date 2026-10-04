@@ -32,7 +32,7 @@ file our published numbers were measured on" or "not a measured file". Only dige
 |---|---|---|
 | `sha256:be5d9a656a51922f24f1f09a759cebb694e1f5d9728bf0ef9f8c972c5a0b5ef2` | NVIDIA's GGUF `hf.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M`, copied to `nemotron-3-nano:4b` | AgentDojo Nano 4B rows (banking off/on, travel held-out, replays) |
 | `sha256:a70437c41b3b0b768c48737e15f8160c90f13dc963f5226aabb3a160f708d1ce` | Ollama library `nemotron-3-nano:30b` (Q4_K_M) | AgentDojo local Nano 30B rows |
-| `sha256:dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c` | Ollama library `qwen3.5:9b` | AgentDojo Qwen 3.5 9B banking and Slack runs; GateBench Modal re-runs |
+| `sha256:dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c` | Ollama library `qwen3.5:9b` | AgentDojo Qwen 3.5 9B banking and Slack runs (prompt v1); GateBench runs of candidate prompts v3/v4, which did not ship ([prompts v1 to v5](bench/agentdojo/RESULTS.md#fixing-the-over-blocking-prompt-v1-to-v5-2026-10-01)) |
 
 Not in the table, on purpose:
 - **`ollama pull nemotron-3-nano:4b` from the Ollama library** is a different file from NVIDIA's GGUF, and no run

@@ -36,7 +36,10 @@ def _no_real_keychain(monkeypatch):
 # Test-wide guard: no test may ever reach a real Ollama (2026-10-04). Running a model on the
 # owner's laptop can take it down, and the reviewer-pin work added Ollama calls to paths the
 # suite already exercises (doctor, assistant start, --imap-setup). Anything aimed at port 11434
-# fails as "connection refused" unless a test installs its own fake urlopen.
+# fails as "connection refused" unless a test installs its own fake urlopen. The guard stands
+# down only for the explicit opt-in HG_MODEL_TESTS=1 (the `model` marker, meant for a GPU box);
+# never set it on the owner's laptop.
+import os
 import urllib.error
 import urllib.request
 
@@ -45,6 +48,9 @@ _real_urlopen = urllib.request.urlopen
 
 @pytest.fixture(autouse=True)
 def _no_real_ollama(monkeypatch):
+    if os.environ.get("HG_MODEL_TESTS") == "1":
+        return
+
     def guarded_urlopen(url, *a, **kw):
         target = getattr(url, "full_url", url)
         if ":11434" in str(target):
