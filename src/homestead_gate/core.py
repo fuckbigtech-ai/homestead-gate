@@ -8,6 +8,13 @@ send leaves a decision with no execution record, never the reverse.
 What the agent sends is only the action and what it says it read. Anything else in the
 request (a "user_intent", an "approved": true) is ignored. The user's intent is the task
 the human gave when starting the gate, because a hijacked agent would lie about it.
+
+Who changed the rules: each Gate writes a policy receipt when it starts serving (`up` at startup;
+an assistant run or scheduled pass with its first request, so an idle pass adds nothing). policy.loaded carries the
+policy file's sha256, the rule hash (version) and the sha256 of the second approvers' file;
+policy.changed is written instead when any of those differ from the last policy receipt in the
+ledger, with the old values next to the new. A policy file edited while the gate runs gets a
+policy.edited receipt at the next request (the running gate keeps the rules it loaded).
 """
 from __future__ import annotations
 
@@ -21,14 +28,16 @@ from typing import Protocol
 
 from homestead_memory.core import ledger
 
-from . import adapters
+from . import adapters, approvers
 from . import lookup as web_lookup
-from .approval import NO_MODEL_REASON, HumanDecision
+from .approval import NO_MODEL_REASON, HumanDecision, needs_full_view
 from .policy import Policy
 from .reviewer import Verdict, render
 
 NO_MODEL = "none (--no-model)"       # the model name cli._NoModelReviewer reports
 AGENT = "homestead-gate"
+# What a policy receipt pins. Any of these differing from the last receipt is a policy change.
+POLICY_KEYS = ("policy_path", "policy_sha256", "policy_version", "approvers_sha256", "dual_control")
 
 
 class Reviewer(Protocol):
@@ -98,8 +107,81 @@ class Gate:
         self.refused: set[str] = set()
         self._lock = threading.Lock()
         self._inflight: dict[str, threading.Event] = {}
+        self._policy_lock = threading.Lock()
+        self._recorded: dict | None = None        # the fingerprint of the last policy receipt this Gate wrote
+        self._disk_seen: str | None = policy.file_sha256
 
-    def _log(self, action: str, summary: str, meta: dict, phase: str, target: str) -> None:
+    # ------------------------------------------------------------------ who changed the rules
+    def _fingerprint(self) -> dict:
+        p = self.policy
+        return {"policy_path": str(p.path) if p.path else None, "policy_sha256": p.file_sha256,
+                "policy_version": p.version, "approvers_sha256": approvers.file_sha256(p.approvers_dir),
+                "dual_control": list(p.dual_control)}
+
+    def _last_policy_receipt(self) -> dict | None:
+        try:
+            recs = ledger.read_all(self.ledger_dir)
+        except Exception:  # noqa: BLE001 - no ledger yet: nothing recorded before
+            return None
+        for r in reversed(recs):
+            if r.get("action") in ("policy.loaded", "policy.changed"):
+                return r.get("meta") or {}
+        return None
+
+    def record_policy(self) -> None:
+        """Write the start-of-serving policy receipt now (idempotent). `up` calls this at startup."""
+        self._check_policy()
+
+    def record_policy_if_changed(self) -> None:
+        """For each scheduled pass, even one with nothing to send: write policy.changed if the policy
+        differs from the last policy receipt in the ledger. Writes nothing otherwise (no noise)."""
+        with self._policy_lock:
+            if self._recorded is not None:
+                return
+            last = self._last_policy_receipt()
+            if last is not None and any(last.get(k) != v for k, v in self._fingerprint().items()
+                                        if k in POLICY_KEYS):
+                self._record_policy(last, first=False)
+
+    def _record_policy(self, last: dict | None = None, *, first: bool = True) -> None:
+        fp = self._fingerprint()
+        last = self._last_policy_receipt() if first else last
+        changed = [k for k in POLICY_KEYS if last is not None and last.get(k) != fp[k]]
+        if changed:
+            prev = {k: last.get(k) for k in POLICY_KEYS}
+            self._log("policy.changed", "policy changed: " + ", ".join(
+                f"{k} {str(prev[k])[:12]} -> {str(fp[k])[:12]}" for k in changed),
+                {**fp, "changed": changed, "previous": prev}, None, "gate:policy")
+        elif first:
+            self._log("policy.loaded", f"policy {fp['policy_version']} file "
+                      f"{(fp['policy_sha256'] or 'none (built in code)')[:12]}", fp, None, "gate:policy")
+        self._recorded = fp
+
+    def _check_policy(self) -> None:
+        """Per request: rules changed in memory since the last receipt (policy.changed), or the file
+        edited on disk under a running gate (policy.edited, once per new file hash)."""
+        with self._policy_lock:
+            if self._recorded is None:
+                self._record_policy()
+            fp = self._fingerprint()
+            if any(fp[k] != self._recorded.get(k) for k in POLICY_KEYS):
+                self._record_policy(self._recorded, first=False)
+            path = self.policy.path
+            if path is None:
+                return
+            try:
+                on_disk = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                on_disk = None
+            if on_disk != self._disk_seen:
+                self._disk_seen = on_disk
+                self._log("policy.edited", f"policy file changed on disk: {(on_disk or 'missing')[:12]}; "
+                          "not in force until the gate restarts",
+                          {"policy_path": str(path), "on_disk_sha256": on_disk,
+                           "in_force_sha256": self.policy.file_sha256,
+                           "policy_version": self.policy.version}, None, "gate:policy")
+
+    def _log(self, action: str, summary: str, meta: dict, phase: str | None, target: str) -> None:
         ledger.append(action, target=target, summary=summary, meta=meta, vault=self.ledger_dir,
                       agent=AGENT, session=self.session, phase=phase)
 
@@ -157,8 +239,10 @@ class Gate:
         reads = request.get("read") or []
         rid = uuid.uuid4().hex[:10]
         target = f"gate:{action.get('type', '?')}"
+        self._check_policy()
         pv = self.policy.version
-        base = {"request_id": rid, "payload_sha256": payload_hash(action, pv), "policy_version": pv}
+        base = {"request_id": rid, "payload_sha256": payload_hash(action, pv), "policy_version": pv,
+                "policy_sha256": self.policy.file_sha256}
         pre = lambda a, s, **m: self._log(a, s, {**base, **m}, ledger.PHASE_PRE, target)
         post = lambda a, s, **m: self._log(a, s, {**base, **m}, ledger.PHASE_POST, target)
 
@@ -201,19 +285,61 @@ class Gate:
             if auto_ok and action.get("type") in ("wallet_tx", "payment") \
                     and not self.policy.task_asks_to_spend(self.task):
                 auto_ok = False                      # the user's request never asked for money to move
+            dual = self.policy.requires_dual_control(action)
+            registered = approvers.load(self.policy.approvers_dir) if dual else {}
+            if auto_ok and dual:
+                auto_ok = False                      # dual control means two people, never the policy alone
             if auto_ok:
                 decided_by, decision, reason = "policy", "approve", auto_why
                 self.policy.record_auto(action)
+            elif dual and not registered:
+                why = ("dual control is on for this action type but no second approver is registered "
+                       "(homestead-gate approver add NAME)")
+                pre("gate.decision", f"policy:deny {why}", decided_by="policy", decision="deny",
+                    dual_control={"required": True, "satisfied": False})
+                post("gate.denied", "not executed", reason=why)
+                return {"id": rid, "status": "denied", "by": "policy", "reason": why,
+                        "review": verdict.verdict}
             else:
+                second = sorted(registered) if dual and getattr(self.approver, "collects_second", False) else None
+                kw = {"second": second} if second is not None else {}
                 # The review above is finished; the lookup cannot reach it (see _recipient_context).
                 context = self._recipient_context(action, pre)
                 h = self._ask(context, rid=rid, action=action, flagged=verdict.flagged,
-                              review_reason=verdict.reason, span=verdict.span)
-                decided_by, decision, reason = f"human:{h.channel}", h.decision, (
-                    "overrode the model's flag" if h.overrode_flag else f"human {h.decision}")
-                pre("gate.decision", f"human:{h.decision}" + (" (overrode flag)" if h.overrode_flag else ""),
-                    decided_by=decided_by, decision=h.decision, channel=h.channel,
-                    latency_s=h.latency_s, overrode_flag=h.overrode_flag)
+                              review_reason=verdict.reason, span=verdict.span, **kw)
+                decision = h.decision
+                reason = "overrode the model's flag" if h.overrode_flag else f"human {h.decision}"
+                extra = {}
+                # The gate decides whether the card had to cut something short, not the approver. A yes
+                # on such a card without the full view is refused, whatever channel it came from.
+                must_view = bool(needs_full_view(action))
+                if decision == "approve" and must_view and not h.full_view_seen:
+                    decision, reason = "deny", "approved without being shown all of it"
+                if dual:
+                    ok = False
+                    if decision == "approve":
+                        ok = second is not None and approvers.verify(registered, h.second_name or "",
+                                                                     h.second_secret or "")
+                        if not ok:
+                            decision = "deny"
+                            reason = ("dual control not satisfied: the second approver was not confirmed"
+                                      if second is not None else
+                                      f"dual control: the {h.channel} channel cannot collect a second approver")
+                    # The typed name is recorded only when it matched; a failed one could be anything.
+                    extra["dual_control"] = {"required": True, "satisfied": ok,
+                                             "second_approver": h.second_name if ok else None}
+                h.second_name = h.second_secret = None          # checked; never kept, never written
+                decided_by = f"human:{h.channel}"
+                summary = f"human:{decision}" + (" (overrode flag)" if h.overrode_flag and decision == "approve" else "")
+                if dual:
+                    summary += " (dual control: " + (f"confirmed by {extra['dual_control']['second_approver']})"
+                                                     if extra["dual_control"]["satisfied"] else "not satisfied)")
+                pre("gate.decision", summary,
+                    decided_by=decided_by, decision=decision, channel=h.channel,
+                    latency_s=h.latency_s, overrode_flag=h.overrode_flag and decision == "approve",
+                    approver=h.approver or {"channel": h.channel, "identified": False},
+                    full_view={"required": must_view, "viewed": h.full_view_seen},
+                    **extra)
 
         if decided_by == "policy":
             pre("gate.decision", f"policy:{decision} {reason}", decided_by="policy", decision=decision)

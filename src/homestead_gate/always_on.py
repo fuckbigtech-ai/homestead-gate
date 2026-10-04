@@ -223,6 +223,14 @@ def run_pass(data: Path, skill: Skill, *, llm, reviewer, now: datetime | None = 
         p.earlier_waiting = len(load_pending(data))
         memory = asst.AssistantMemory(data / "memory")
         names = {addr: f["entity"] for addr, f in memory.contacts().items()}
+        # Each pass notices an edited policy, even with no new mail: policy.changed if it differs from
+        # the last policy receipt, nothing otherwise. A policy that does not load fails the run below.
+        try:
+            Gate(policy=asst.load_policy(data, memory), reviewer=reviewer, approver=HoldApprover(),
+                 ledger_dir=data / "ledger", task=skill.instruction, session=secrets.token_hex(4),
+                 outbox=data / "outbox").record_policy_if_changed()
+        except (OSError, ValueError) as e:
+            log(f"policy check skipped: {e}")
         if p.new_mail:
             out = _run(data, skill, p, state, llm=llm, reviewer=reviewer, memory=memory, names=names,
                        guard_prompt=guard_prompt, max_steps=max_steps, make_bot=make_bot,

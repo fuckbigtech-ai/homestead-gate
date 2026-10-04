@@ -120,6 +120,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
   white-space: pre-wrap; word-break: break-word; background: var(--code-bg); border-radius: 8px;
   padding: 8px 10px; margin: 6px 0 0; max-height: 240px; overflow: auto;
 }
+.card pre.clip { max-height: 7.5em; overflow: hidden; mask-image: linear-gradient(#000 60%, transparent); }
+.card pre.full { max-height: none; overflow: visible; }
+.actions .expand { grid-column: 1 / -1; }
 .step.thinking { color: var(--muted); border-left-style: dashed; }
 .step.err { border-left-color: var(--bad); color: var(--bad); }
 

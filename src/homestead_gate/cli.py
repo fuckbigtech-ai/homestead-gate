@@ -9,6 +9,7 @@
   homestead-gate assistant --skill triage                      the personal assistant: cloud brain, local gate
   homestead-gate assistant --watch --every 15m                 always-on: new mail on a schedule, a brief, a notification
   homestead-gate assistant --data DIR --imap-setup             your real inbox, read-only (then --sync, or --watch)
+  homestead-gate approver add NAME                             register a second approver for dual control (they type a passphrase)
 """
 from __future__ import annotations
 
@@ -213,6 +214,7 @@ def _serve(policy: Policy, a, task: str, smtp=None) -> int:
                                           timeout_s=policy.approval_timeout_s),
                 ledger_dir=ledger_dir, task=task, session=session,
                 outbox=HOME / "outbox", smtp=smtp, live=live, lookup=_web_lookup(policy))
+    gate.record_policy()           # policy.loaded / policy.changed, before the first request
     from .daemon import make_server
     srv = make_server(gate, port=a.port)
     print(f"homestead-gate on 127.0.0.1:{a.port}  session {session}")
@@ -341,6 +343,48 @@ def cmd_creds_clear(a) -> int:
     from . import credstore
     credstore.clear()
     print("smtp credentials removed")
+    return 0
+
+
+def _secret_prompt(prompt: str) -> str:
+    import getpass
+    try:
+        return getpass.getpass(prompt)
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+
+def cmd_approver(a) -> int:
+    """Second approvers for dual control. They live next to the policy file, as a name and a salted
+    scrypt hash; the passphrase is typed (never an argument, which would land in shell history)."""
+    from . import approvers
+    folder = Path(a.policy).expanduser().resolve().parent
+    if a.approver_cmd == "list":
+        names = approvers.load(folder)
+        if not names:
+            print(f"no second approvers registered in {approvers.path(folder)}")
+        for n, rec in sorted(names.items()):
+            print(f"  {n}  (added {rec.get('added', '?')})")
+        return 0
+    if a.approver_cmd == "remove":
+        if not approvers.remove(folder, a.name):
+            print(f"no approver named {a.name!r}", file=sys.stderr)
+            return 1
+        print(f"removed {a.name}. the next gate start records policy.changed.")
+        return 0
+    print(f"{a.name}: type your passphrase. the person approving first must not know it.")
+    first = _secret_prompt("passphrase (not shown): ")
+    again = _secret_prompt("again: ")
+    if first != again:
+        print("the two entries differ; nothing stored", file=sys.stderr)
+        return 2
+    try:
+        approvers.add(folder, a.name, first)
+    except ValueError as e:
+        print(f"not stored: {e}", file=sys.stderr)
+        return 2
+    print(f"stored {a.name} in {approvers.path(folder)} (salted scrypt hash only, mode 0600).")
+    print("turn it on in the policy: [approval] second_approver = true, or dual_control = [\"wallet_tx\"]")
     return 0
 
 
@@ -846,6 +890,17 @@ def main(argv=None) -> int:
     crs.add_parser("clear").set_defaults(func=cmd_creds_clear)
     crs.add_parser("set-tavily", help="store a Tavily API key for the optional web lookup of unknown "
                    "recipients; you type it into the OS prompt").set_defaults(func=cmd_creds_set_tavily)
+
+    ap = sub.add_parser("approver", help="second approvers for dual control (a passphrase only they know)")
+    aps = ap.add_subparsers(dest="approver_cmd", required=True)
+    for name, helptext in (("add", "register NAME; they type their passphrase twice"),
+                           ("remove", "remove NAME"), ("list", "list registered approvers")):
+        x = aps.add_parser(name, help=helptext)
+        if name != "list":
+            x.add_argument("name")
+        x.add_argument("--policy", default=str(HOME / "policy.toml"),
+                       help="the policy whose folder keeps approvers.json (assistant: DATA/policy.toml)")
+        x.set_defaults(func=cmd_approver)
 
     w = sub.add_parser("watch", help="show the receipts; exits 1 if the chain is broken")
     w.add_argument("--ledger", default=str(HOME / "ledger"))

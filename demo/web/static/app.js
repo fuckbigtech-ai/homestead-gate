@@ -303,7 +303,18 @@ function describeAction(a) {
   return a.type;
 }
 
-function actionList(a, label) {
+function asText(v) {
+  if (typeof v === "string") return v;
+  if (Array.isArray(v) && v.every((x) => typeof x === "string")) return v.join(", ");
+  return JSON.stringify(v);
+}
+
+// mustExpand: the fields the server says a card has to cut short (the same rule as the terminal card).
+// Those start clipped, and the card's Approve stays disabled until they are shown in full. On a waiting
+// card everything else is shown at full height, never inside a scroll box someone could skip.
+function actionList(a, label, mustExpand) {
+  const waiting = Array.isArray(mustExpand);
+  const cut = new Set(mustExpand || []);
   const dl = el("dl", "kv");
   const row = (k, v, sub) => {
     const dd = el("dd", "", v);
@@ -315,10 +326,17 @@ function actionList(a, label) {
   if (a.type === "wallet_tx") { row("Amount", `${a.value_eth} ETH`); row("Chain", `Sepolia (${a.chain_id})`); }
   const frag = document.createDocumentFragment();
   frag.append(dl);
-  if (a.type === "email") {
-    const p = el("pre", "", a.body || "");
-    frag.append(el("div", "block-label", "Body, exactly as it would be sent"), p);
+  const long = (name, key, value) => {
+    const p = el("pre", cut.has(key) ? "clip" : waiting ? "full" : "", value);
+    frag.append(el("div", "block-label", name), p);
+  };
+  for (const [name, key] of [["Cc", "cc"], ["Bcc", "bcc"], ["Attachments", "attachments"], ["Calldata", "data"]]) {
+    const v = a[key];
+    if (v === undefined || v === null || v === "" || (Array.isArray(v) && !v.length)) continue;
+    if (cut.has(key)) long(name, key, asText(v));
+    else row(name, asText(v));
   }
+  if (a.type === "email") long("Body, exactly as it would be sent", "body", a.body || "");
   return frag;
 }
 
@@ -380,7 +398,7 @@ function onApproval(d) {
   const head = el("div", "card-head");
   const timer = el("span", "timer");
   head.append(el("span", "card-title", `Approval needed: ${describeAction(d.action)}`), timer);
-  card.append(head, actionList(d.action, d.to_label));
+  card.append(head, actionList(d.action, d.to_label, d.must_expand));
   // Untrusted web text above the reviewer's verdict, so the trusted signal sits next to the buttons.
   const lookup = lookupBlock(d.web_lookup);
   if (lookup) card.append(lookup);
@@ -393,6 +411,23 @@ function onApproval(d) {
   const deny = el("button", "deny", "Deny");
   const approve = el("button", "approve", d.flagged ? "Approve anyway..." : "Approve");
   deny.type = approve.type = "button";
+  // What you approve is what you saw: a card cut short cannot be approved until it is shown in full.
+  // Deny always works. The server also refuses an approve without viewed=true, so this is not the only check.
+  let viewed = !(d.must_expand && d.must_expand.length);
+  if (!viewed) {
+    approve.disabled = true;
+    approve.title = "Show all of it first";
+    const expand = el("button", "expand", `Show all of it (${d.must_expand.join(", ")} cut short)`);
+    expand.type = "button";
+    expand.addEventListener("click", () => {
+      for (const p of card.querySelectorAll("pre.clip")) { p.classList.remove("clip"); p.classList.add("full"); }
+      viewed = true;
+      approve.disabled = false;
+      approve.title = "";
+      expand.remove();
+    });
+    actions.append(expand);
+  }
   actions.append(deny, approve);
   const msg = el("div", "card-msg");
   card.append(actions, msg);
@@ -413,12 +448,13 @@ function onApproval(d) {
   cards[d.rid] = { card, actions, msg, timer, tick, receipts };
 
   const send = async (decision, phrase) => {
-    const r = await api("/api/decide", { run_id: runId, rid: d.rid, decision, phrase: phrase || "" });
+    const r = await api("/api/decide", { run_id: runId, rid: d.rid, decision, phrase: phrase || "", viewed });
     if (!r.ok) msg.textContent = r.data.message || r.data.error || "Not accepted.";
     else msg.textContent = "";
   };
   deny.addEventListener("click", () => send("deny"));
   approve.addEventListener("click", () => {
+    if (!viewed) return;
     if (!d.flagged) return send("approve");
     if (card.querySelector(".override")) return;
     const box = el("div", "override");

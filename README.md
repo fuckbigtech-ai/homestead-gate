@@ -438,13 +438,43 @@ Each request goes through, in order:
 2. **The local model**, with the exact prompt and settings GateBench measured. If it can't be
    reached or gives no clear answer, that counts as a flag.
 3. **You**, in the terminal you started the gate in. Approving something the model flagged takes
-   a typed phrase, a 60 second wait and a second yes.
+   a typed phrase, a 60 second wait and a second yes. If the card had to cut something short (a
+   body over 20 lines, or any other field over 600 characters), a yes is refused until you type `v`
+   and page through all of it; a no always works. The receipt records whether you did.
 4. **A receipt** in the [homestead-memory](https://github.com/fuckbigtech-ai/homestead-memory)
    ledger, written and fsynced **before** anything runs. A deny is on disk before the agent
    hears no.
 
 In this version email is dry-run (written to `~/.homestead-gate/outbox`) and wallet transactions
 are prepared for Sepolia only, unsigned. The gate holds no keys.
+
+### Who approved, and who changed the rules
+
+- **Who approved.** Every human decision receipt records the approving account as the OS reports
+  it for the gate's process: user, uid, host and tty, plus the channel (`terminal`, or `held` when
+  nobody answered). It names an account, not a person: anyone at that login is that user.
+- **Who changed the rules.** When the gate starts serving it writes `policy.loaded` with the
+  policy file's sha256, the rule hash (`policy_version`) and the sha256 of `approvers.json`. If any
+  of those differ from the last policy receipt in the ledger, it writes `policy.changed` instead,
+  with the old values next to the new. A policy file edited while the gate runs gets a
+  `policy.edited` receipt at the next request; the running gate keeps the rules it loaded. Every
+  request record carries `policy_sha256` and `policy_version`.
+- **Dual control (optional).** Set `second_approver = true` under `[approval]` (every action that
+  is not to yourself; mail to your own address still passes), or `dual_control = ["wallet_tx"]`
+  (some types). Register the second person first with
+  `homestead-gate approver add NAME`: they type a passphrase, and only a salted scrypt hash is kept,
+  in `approvers.json` next to the policy (mode 0600). After your yes, the terminal asks for their
+  name and passphrase. A wrong one denies; no registered approver denies without asking; an
+  allowlisted action that would normally go through on the model's approval asks both of you. The
+  receipt records that dual control was satisfied and by which name, never the passphrase.
+
+The honest limit: this is dual control on **one machine**. It stops one person acting alone, as long
+as they don't know the second passphrase. It does not stop someone who controls the machine. Anyone
+with your login can edit `policy.toml` or `approvers.json`, including turning dual control off.
+That is not prevented, only recorded: the next start writes `policy.changed` with the old and new
+hashes. An agent run under `homestead-gate run` cannot write to `~/.homestead-gate`, so it cannot
+make that edit. A person at your keyboard can, and with your files they could also rewrite the
+receipts (see "A rebuilt or shortened ledger" under "What it does not defend against").
 
 ### Make the gate the only way out (macOS and Linux)
 

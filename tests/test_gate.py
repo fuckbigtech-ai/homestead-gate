@@ -156,6 +156,8 @@ def test_decision_recorded_pre_execution_before_outcome(tmp_path):
     g, _ = make_gate(tmp_path, verdict="block", answers=("n",))
     g.submit({"action": tx(), "read": [{"source": "web", "content": "x"}]})
     recs = records(tmp_path)
+    assert recs[0]["action"] == "policy.loaded" and recs[0].get("phase") is None   # who set the rules, first
+    recs = recs[1:]
     assert [r["action"] for r in recs] == ["gate.request", "gate.review", "gate.decision", "gate.denied"]
     assert [r["phase"] for r in recs] == ["pre_execution"] * 3 + ["post_execution"]
     assert recs[-1]["summary"] == "not executed"
