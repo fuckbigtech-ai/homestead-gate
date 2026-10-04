@@ -208,3 +208,10 @@ select, .add-skill input {
   .card.waiting { animation: pulse 2.4s ease-in-out infinite; }
   @keyframes pulse { 50% { box-shadow: 0 0 0 5px var(--warn-bg); } }
 }
+
+/* web lookup of an unknown recipient: untrusted web text, for the human only */
+.lookup .sub { display: block; font-size: 13px; color: var(--muted); }
+.lookup-row { margin-top: 8px; overflow-wrap: anywhere; }
+.lookup-title { font-weight: 600; }
+.lookup-url { font-size: 13px; color: var(--muted); font-family: ui-monospace, monospace; }
+.lookup-snippet { font-size: 14px; }

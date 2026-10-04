@@ -18,6 +18,10 @@ an argument, an environment variable, a log line or a receipt.
 The assistant's read-only IMAP login (mailbox.py) is a separate entry, "homestead-gate-imap", so a
 password saved for reading mail is never used to send: live email still needs `creds set-smtp`
 and `--live`.
+
+The optional Tavily key (lookup.py, web lookup of unknown recipients) is the entry "tavily-api-key".
+It is read without an account name, so `security add-generic-password -s tavily-api-key -a <any> -w`
+works. It is only ever sent to api.tavily.com as the Authorization header.
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ from subprocess import TimeoutExpired      # by name: tests swap the subprocess 
 
 SERVICE = "homestead-gate-smtp"
 IMAP_SERVICE = "homestead-gate-imap"
+TAVILY_SERVICE = "tavily-api-key"
 LOOKUP_TIMEOUT_S = 20
 HOME = Path.home() / ".homestead-gate"
 CONFIG = HOME / "smtp.toml"
@@ -78,11 +83,14 @@ def _store_secret(service: str, user: str, label: str) -> None:
         raise CredentialError("the credential store did not save the password")
 
 
-def _load_secret(service: str, user: str) -> str | None:
+def _load_secret(service: str, user: str | None) -> str | None:
     # A timeout, because the store may answer with a permission dialog that nobody is there to
     # click (launchd, cron): an unattended pass must fail, not hang holding its lock.
-    argv = (["security", "find-generic-password", "-s", service, "-a", user, "-w"] if _backend() == "keychain"
-            else ["secret-tool", "lookup", "service", service, "user", user])
+    # user=None matches the service whatever the account (the Tavily key's account is the owner's choice).
+    if _backend() == "keychain":
+        argv = ["security", "find-generic-password", "-s", service] + (["-a", user] if user else []) + ["-w"]
+    else:
+        argv = ["secret-tool", "lookup", "service", service] + (["user", user] if user else [])
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=LOOKUP_TIMEOUT_S)
     except TimeoutExpired:
@@ -130,6 +138,17 @@ def store_imap(user: str) -> None:
 
 def load_imap_password(user: str) -> str | None:
     return _load_secret(IMAP_SERVICE, user)
+
+
+def load_tavily_key() -> str | None:
+    """The Tavily API key for the optional web lookup, or None. Never logged, never in a receipt."""
+    return _load_secret(TAVILY_SERVICE, None)
+
+
+def store_tavily(account: str = "homestead-gate") -> None:
+    """Have the OS store prompt the human for the Tavily key (interactive)."""
+    _backend()
+    _store_secret(TAVILY_SERVICE, account, "homestead-gate tavily (web lookup)")
 
 
 def clear_imap(user: str) -> None:

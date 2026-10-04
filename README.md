@@ -482,6 +482,57 @@ Limits: another program running as you can still ask the keychain for the entry.
 a visible permission dialog rather than the password, so say no to anything that isn't the gate. A
 compromised gate process has the password. Linux needs libsecret; there is no plaintext fallback.
 
+### Web lookup of unknown recipients (optional, Tavily)
+
+Sometimes an action comes to you because its recipient is not a known contact. Examples are an email
+to an address or domain you have no record of, or a wallet that is not in your memory. In that case
+the gate can search the web for the recipient with [Tavily](https://tavily.com) and show a short
+"What the web says about <domain>" block on the approval card. You then decide with context.
+
+Setup. The lookup is off by default and needs both of these:
+
+```bash
+security add-generic-password -s tavily-api-key -a homestead-gate -w   # macOS; you type the key at the prompt
+# or: homestead-gate creds set-tavily   (Linux: libsecret, same service name)
+```
+
+```toml
+[lookup]
+tavily = true        # in ~/.homestead-gate/policy.toml (or the assistant's policy.toml)
+```
+
+The web demo turns it on when `TAVILY_API_KEY` is set. On Modal, run
+`modal secret create tavily TAVILY_API_KEY=...` before you deploy.
+
+What goes to Tavily: only the recipient's domain (for `billing@mail.example.com` that is
+`example.com`), or the wallet address, inside a fixed query (`"<domain>" scam OR phishing OR company`).
+The gate never sends the local part, the subject, the body, your name or any other content. A `to` that
+is not exactly one clean address or 0x wallet sends nothing. Your own address, your allowlist and
+contacts you saved in memory are never looked up. The same goes for their domains.
+
+The trust rule: the result is untrusted web text, and whoever ranks for that domain may be the
+attacker.
+- Only you see it, on the terminal card or the web demo card.
+- The lookup runs after the reviewer has answered, and its text is never added to the reviewer's
+  prompt.
+- It is never returned to the agent.
+- It never changes the policy or the verdict. The gate makes the same decision with or without it.
+
+The card also sanitizes the text:
+- Control and format characters are removed.
+- Newlines are collapsed.
+- Each snippet is capped at about 200 characters.
+- At most 3 results are shown.
+- Source URLs are shown as text, never as links.
+- Results are cached per domain for the session.
+
+The ledger records that a lookup happened (the domain or address, the number of results, and ok or
+failed). It never stores the snippets.
+
+Fail safe: the lookup can be off, the key can be missing, or the call can time out (6 s) or fail. In
+each case the card says "web lookup unavailable" and nothing else changes. The lookup never blocks
+an action and never approves one.
+
 ### Threat model
 
 Who can attack, what they can do, and what stops them. "Outbound action" means anything that leaves your

@@ -38,6 +38,7 @@ def _no_network(monkeypatch):
     monkeypatch.delenv("HSM_VAULT", raising=False)
     monkeypatch.delenv("DEMO_BRAIN", raising=False)
     monkeypatch.delenv("DEMO_REVIEWER", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
 
 class Clock:
@@ -160,6 +161,44 @@ def test_denied_from_the_page_is_recorded_as_web_demo(tmp_path):
     assert res["status"] == "denied" and res["by"] == "human:web-demo"
     assert any(r["summary"] == "human:deny" for r in res["receipts"])
     assert not (s.dir / "outbox").exists()
+
+
+def test_card_shows_web_lookup_but_reviewer_and_agent_never_see_it(tmp_path):
+    from homestead_gate import lookup
+    marker = "ZQX-WEB-DEMO-MARKER"
+    sent = []
+
+    def transport(url, body, headers, timeout):
+        sent.append(json.loads(body))
+        return json.dumps({"results": [{"title": f"t {marker}", "url": "https://r.example/x",
+                                        "content": f"snippet {marker}"}]}).encode()
+    app, rv, transports = make_app(tmp_path, [HIJACK], approval_timeout_s=0.05,
+                                   lookup_factory=lambda: lookup.TavilyLookup("k", transport=transport))
+    s = app.session(None)
+    run = app.start_run(s, "summarize", unguarded=True, background=False)
+    card = next(e["data"] for e in run.events if e["type"] == "approval")
+    assert card["web_lookup"]["ok"] and marker in card["web_lookup"]["results"][0]["snippet"]
+    assert [x["query"] for x in sent] == ['"mail-protect.example" scam OR phishing OR company']
+    assert all(marker not in p for p in rv.prompts)                       # the reviewer
+    assert all(marker not in json.dumps(t.requests) for t in transports)  # the agent's model
+    res = next(e["data"] for e in run.events if e["type"] == "gate_result")
+    assert marker not in json.dumps(res)
+    assert marker not in (s.ledger_dir / ".hsm" / "ledger.jsonl").read_text()
+    assert res["status"] == "expired"
+
+
+def test_web_lookup_off_without_key(tmp_path):
+    app, rv, _ = make_app(tmp_path, [HIJACK], approval_timeout_s=0.05)
+    s = app.session(None)
+    run = app.start_run(s, "summarize", unguarded=True, background=False)
+    card = next(e["data"] for e in run.events if e["type"] == "approval")
+    assert card["web_lookup"]["ok"] is False and "unavailable" in card["web_lookup"]["label"]
+
+
+def test_page_renders_web_lookup_as_text_only():
+    js = (REPO / "demo" / "web" / "static" / "app.js").read_text()
+    block = js[js.index("function lookupBlock"):js.index("function receiptBlock")]
+    assert "innerHTML" not in block and "href" not in block and "el(" in block
 
 
 # ---- sessions -----------------------------------------------------------------------------

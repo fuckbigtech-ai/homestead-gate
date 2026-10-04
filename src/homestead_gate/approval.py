@@ -51,6 +51,14 @@ def _tty_input(prompt: str, timeout_s: float) -> str | None:
     return line.strip() if line else None
 
 
+def _line(value, cap: int) -> str:
+    """One line for the card: control characters out, every newline or tab collapsed to a space.
+    clean() keeps newlines on purpose (bodies have lines); web text must not, or a snippet could
+    print a fake '  reviewer: ok' line of its own."""
+    s = " ".join(clean(value).split())
+    return s if len(s) <= cap else s[:cap - 3] + "..."
+
+
 class TerminalApprover:
     def __init__(self, *, override_delay_s: float = 60, timeout_s: float = 300,
                  input_fn: Callable[[str, float], str | None] = _tty_input,
@@ -60,7 +68,8 @@ class TerminalApprover:
         self.input, self.out, self.sleep, self.channel = input_fn, out, sleep, channel
         self._lock = threading.Lock()      # one prompt at a time, even with parallel requests
 
-    def ask(self, *, rid: str, action: dict, flagged: bool, review_reason: str, span: str) -> HumanDecision:
+    def ask(self, *, rid: str, action: dict, flagged: bool, review_reason: str, span: str,
+            context: dict | None = None) -> HumanDecision:
         with self._lock:
             t0 = time.time()
             left = lambda: self.timeout - (time.time() - t0)
@@ -77,6 +86,8 @@ class TerminalApprover:
                 if len(lines) > BODY_LINES:
                     hidden = sum(len(x) + 1 for x in lines[BODY_LINES:])
                     self.out(f"    (+{len(lines) - BODY_LINES} more lines, {hidden} characters not shown)")
+            # Web text first: the reviewer's verdict, the trusted signal, stays next to the question.
+            self._show_lookup((context or {}).get("web_lookup"))
             if flagged and review_reason.startswith(NO_MODEL_REASON):
                 self.out(f"  -- {clean(review_reason)}")
             elif flagged:
@@ -107,3 +118,20 @@ class TerminalApprover:
             ok = final.lower() in ("y", "yes")
             return HumanDecision("approve" if ok else "deny", self.channel,
                                  round(time.time() - t0, 2), overrode_flag=ok)
+
+    def _show_lookup(self, lk: dict | None) -> None:
+        """The web lookup of an unknown recipient (lookup.py). Untrusted web text for the human only:
+        the reviewer never saw it and it changes nothing about the decision. Already sanitized by
+        lookup.py; cleaned again here because this is the last stop before the terminal."""
+        if not lk:
+            return
+        if not lk.get("ok"):
+            self.out(f"  web: {_line(lk.get('label') or 'web lookup unavailable', 120)}")
+            return
+        results = lk.get("results") or []
+        self.out(f"  web: {_line(lk.get('label'), 120)}: {len(results)} results "
+                 "(untrusted web text, for you only; the reviewer did not see it)")
+        for i, r in enumerate(results[:3], 1):
+            self.out(f"    {i}. {_line(r.get('title'), 100)}  <{_line(r.get('url'), 120)}>")
+            if r.get("snippet"):
+                self.out(f"       {_line(r.get('snippet'), 200)}")

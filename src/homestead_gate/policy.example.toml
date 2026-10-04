@@ -26,3 +26,10 @@ timeout_s = 120
 [approval]
 override_delay_s = 60      # wait before you can approve something the model flagged
 timeout_s = 300            # unanswered requests expire and are not executed
+
+[lookup]
+# Look up recipients who are not known contacts on the web (Tavily) and show what it finds on the
+# approval card. Untrusted text for YOU only: never shown to the reviewer, never changes a decision.
+# Sends only the domain or wallet address. Also needs the key:
+#   security add-generic-password -s tavily-api-key -a homestead-gate -w
+tavily = false
