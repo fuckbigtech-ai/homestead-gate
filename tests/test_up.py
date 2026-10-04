@@ -1,6 +1,7 @@
 """`homestead-gate up` / `doctor` and the hardware fit. Fakes only: no network, no model,
 no subprocess. Every test that runs the CLI goes through the `env` fixture, which makes any
-Ollama call other than /api/version and /api/tags, and any subprocess, fail the test."""
+Ollama call other than /api/version, /api/tags and /api/show (none loads a model), and any
+subprocess, fail the test."""
 import io
 import json
 import subprocess
@@ -11,12 +12,19 @@ from pathlib import Path
 import pytest
 from homestead_memory.core import ledger as hl
 
-from homestead_gate import cli, hardware, installer
+from homestead_gate import cli, hardware, installer, pin
 from homestead_gate.cli import main as cli_main
 from homestead_gate.policy import Policy
 
 ROOT = Path(__file__).resolve().parents[1]
 WALLET = "0x" + "1" * 40
+
+
+def write_pinned(env, model, email="me@example.com"):
+    """An existing policy whose reviewer was pinned against what the fake Ollama has on disk."""
+    installer.write_policy(env.pol, email, "", model)
+    env.ollama.tags = [model]
+    return pin.write_pin(env.pol, pin.read_identity("http://127.0.0.1:11434", model))
 
 
 def mac(gb, chip="Apple M3 Pro"):
@@ -162,22 +170,7 @@ def test_pull_without_guard_says_so():
 
 # ---- the CLI, with fakes ---------------------------------------------------------------------
 
-class FakeOllama:
-    """Answers /api/version and /api/tags. Anything else (chat, generate, show, pull) fails the test."""
-    def __init__(self, tags=(), up=True):
-        self.tags, self.up, self.urls = list(tags), up, []
-
-    def __call__(self, url, timeout=None):
-        self.urls.append(url)
-        if not self.up:
-            raise urllib.error.URLError("connection refused")
-        if url.endswith("/api/version"):
-            body = {"version": "0.99.0"}
-        elif url.endswith("/api/tags"):
-            body = {"models": [{"name": t} for t in self.tags]}
-        else:
-            raise AssertionError(f"up/doctor must not call {url}")
-        return io.BytesIO(json.dumps(body).encode())
+from fake_ollama import FakeOllama  # noqa: E402  (/api/version, /api/tags, /api/show; nothing that loads)
 
 
 @pytest.fixture
@@ -282,8 +275,7 @@ def test_up_yes_needs_email_and_task(env):
 
 
 def test_up_with_existing_policy_keeps_it(env, capsys):
-    installer.write_policy(env.pol, "me@example.com", "", "nemotron-3-nano:4b")
-    env.ollama.tags = ["nemotron-3-nano:4b"]
+    write_pinned(env, "nemotron-3-nano:4b")
     assert cli_main(["up", "--task", "x", *env.args]) == 0
     assert env.served[0][0].model == "nemotron-3-nano:4b"
     assert "the pick would be qwen3.5:9b" in capsys.readouterr().out
@@ -323,8 +315,7 @@ def test_up_ollama_missing_prints_install(env, capsys, monkeypatch):
 # ---- doctor ----------------------------------------------------------------------------------
 
 def test_doctor_all_good(env, capsys):
-    installer.write_policy(env.pol, "me@example.com", "", "qwen3.5:9b")
-    env.ollama.tags = ["qwen3.5:9b"]
+    write_pinned(env, "qwen3.5:9b")
     hl.append("gate.test", target="x", summary="one", vault=env.led, agent="t", phase=hl.PHASE_PRE)
     rc = cli_main(["doctor", *env.args])
     out = capsys.readouterr().out

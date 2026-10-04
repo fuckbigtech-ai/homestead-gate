@@ -23,6 +23,7 @@ import inspect
 import json
 import threading
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
 
@@ -35,6 +36,7 @@ from .policy import Policy
 from .reviewer import Verdict, render
 
 NO_MODEL = "none (--no-model)"       # the model name cli._NoModelReviewer reports
+REVIEW_META_KEYS = {"digest": None, "manifest_digest": None, "prompt_version": None, "prompt_sha256": None}
 AGENT = "homestead-gate"
 # What a policy receipt pins. Any of these differing from the last receipt is a policy change.
 POLICY_KEYS = ("policy_path", "policy_sha256", "policy_version", "approvers_sha256", "dual_control")
@@ -283,13 +285,13 @@ class Gate:
                 action=action)
             verdict = self.reviewer.review(prompt)
             if verdict.model != NO_MODEL and verdict.reason.startswith(NO_MODEL_REASON):
-                verdict = Verdict(verdict.verdict, "reviewer said: " + verdict.reason, verdict.span,
-                                  verdict.model, verdict.secs)         # the card keys its label on this text
+                verdict = replace(verdict, reason="reviewer said: " + verdict.reason)  # the card keys its label on this text
             # llm:approve | llm:block | llm:invalid. "invalid" means the model did not review it
             # (missing, unreachable, no clear answer); the log must not call that a review.
             # The model's reason is kept out: it can quote the body, and the body stays out.
-            pre("gate.review", f"llm:{verdict.verdict}", model=verdict.model,
-                verdict=verdict.verdict, secs=verdict.secs)
+            # Which model file and which prompt judged it (None when no model reviewed: --no-model).
+            pre("gate.review", f"llm:{verdict.verdict}", **{**REVIEW_META_KEYS, **verdict.meta},
+                model=verdict.model, verdict=verdict.verdict, secs=verdict.secs)
             auto_ok, auto_why = (self.policy.may_auto(action) if not verdict.flagged
                                  and self.policy.is_allowlisted(action) else (False, ""))
             if auto_ok and action.get("type") in ("wallet_tx", "payment") \

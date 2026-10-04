@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SEPOLIA = 11155111
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Settings that are not rules about actions, so they stay out of `version`: the [receipts] anchors,
 # and the [lookup] switch, whose text goes only to the human and never changes a decision. Changing
 # them must not invalidate approvals or payload hashes (the policy receipt's file hash still moves).
@@ -59,6 +60,12 @@ class Policy:
     ollama_url: str = "http://127.0.0.1:11434"
     review_timeout_s: float = 120
     review_think: bool = False       # [review] think = true: the reviewer reasons first (slower, fewer false blocks)
+    # [review] digest / manifest_digest: the exact reviewer model file (weights blob) and Ollama manifest,
+    # written by `homestead-gate reviewer pin`. Both are rules, so once set both are in `version`: an
+    # approval given under one model file is never mistaken for one given under another. Unset, they
+    # stay out of it, so a policy that was never pinned keeps its earlier version.
+    review_digest: str = ""
+    review_manifest_digest: str = ""
     override_delay_s: float = 60
     approval_timeout_s: float = 300
     # [lookup] tavily = true: web lookup of unknown recipients, shown to the human only (lookup.py).
@@ -97,6 +104,7 @@ class Policy:
             max_actions_per_hour=int(lim.get("max_actions_per_hour", 20)),
             model=rv.get("model", "qwen3.5:9b"), ollama_url=rv.get("ollama_url", "http://127.0.0.1:11434"),
             review_timeout_s=float(rv.get("timeout_s", 120)), review_think=bool(rv.get("think", False)),
+            review_digest=str(rv.get("digest", "")), review_manifest_digest=str(rv.get("manifest_digest", "")),
             override_delay_s=float(ap.get("override_delay_s", 60)),
             approval_timeout_s=float(ap.get("timeout_s", 300)),
             lookup_tavily=lk.get("tavily", False) is True,
@@ -104,6 +112,10 @@ class Policy:
             _path=Path(path).expanduser().resolve(), _file_sha256=hashlib.sha256(raw).hexdigest(),
             anchor_dir=str(rc.get("anchor_dir", "")), anchor_command=str(rc.get("anchor_command", "")),
         )
+        for key, val in (("digest", p.review_digest), ("manifest_digest", p.review_manifest_digest)):
+            if val and not DIGEST_RE.fullmatch(val):
+                raise ValueError(f"[review] {key} {val!r} is not sha256:<64 hex>; re-pin with "
+                                 "`homestead-gate reviewer pin`")
         if p.chain_id != SEPOLIA:
             # v1 is testnet only. Refusing to load beats a mainnet transaction nobody meant.
             raise ValueError(f"chain_id {p.chain_id} refused: v1 supports Sepolia ({SEPOLIA}) only")
@@ -115,8 +127,11 @@ class Policy:
         set of rules is never mistaken for one given under another (u/arthaudm, 2026-09-30:
         "include the policy version so a changed rule can't reuse an old approval")."""
         rules = {k: v for k, v in sorted(vars(self).items()) if not k.startswith("_") and k not in _NOT_RULES}
-        if not rules["dual_control"]:
-            del rules["dual_control"]       # policies written before dual control keep their version
+        # Rules added later enter the hash only once they are set, so a policy that does not use them
+        # keeps the version it had before they existed (and old receipts and payload hashes still match).
+        for k in ("dual_control", "review_digest", "review_manifest_digest"):
+            if not rules[k]:
+                del rules[k]
         return hashlib.sha256(json.dumps(rules, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
     @property

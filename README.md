@@ -408,6 +408,23 @@ PATH.
 `up` asks for the task. The reviewer trusts only this, and it comes from you, never from the agent.
 Then the gate starts.
 
+### Reviewer model risk
+
+A tag like `qwen3.5:9b` is a name, not a file: a later `ollama pull` can bring different weights. So on
+first setup `up` (and `assistant --imap-setup`) pins the exact model file in the policy: `[review] digest`
+(the weights blob) and `manifest_digest`. On every start the gate checks them, and refuses if the model on
+disk is not the pinned file; it re-checks before every review, so a model swapped mid-session never
+reviews (you decide instead). `--allow-unpinned-reviewer` runs anyway and every review receipt says so.
+Each receipt names the model, both digests and the prompt's sha256.
+
+```bash
+homestead-gate reviewer pin       # re-pin on purpose: prints model, digest, size; records a canary baseline
+homestead-gate reviewer canary    # 20 frozen GateBench cases vs the baseline; exit 1 on drift (weekly)
+homestead-gate doctor             # says whether your file is the one our published numbers were measured on
+```
+
+Inventory, validation evidence, known limits, change control and the launchd schedule: [MODEL_RISK.md](MODEL_RISK.md).
+
 To run without prompts:
 
 ```bash

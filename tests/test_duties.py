@@ -216,9 +216,10 @@ def test_policy_version_is_unchanged_when_dual_control_is_off():
     # policies written before dual control keep their rule hash, so old receipts still match
     p = Policy(user_email=ME)
     # the rule hash as it was before dual control: every rule field (version's own exclusions, such as
-    # the [receipts] anchor settings and the display-only [lookup] switch, stay excluded)
+    # the [receipts] anchor settings and the display-only [lookup] switch, stay excluded, and so do
+    # the reviewer pin's digests while they are unset, as here)
     rules = {k: v for k, v in sorted(vars(p).items()) if not k.startswith("_") and k != "dual_control"
-             and k not in _NOT_RULES}
+             and k not in _NOT_RULES and not (k in ("review_digest", "review_manifest_digest") and not v)}
     want = hashlib.sha256(json.dumps(rules, sort_keys=True, default=str).encode()).hexdigest()[:16]
     assert p.version == want
     assert Policy(user_email=ME, dual_control=["wallet_tx"]).version != p.version
