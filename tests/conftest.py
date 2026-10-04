@@ -31,3 +31,24 @@ def _no_real_keychain(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", guarded_run)
     monkeypatch.setattr(subprocess, "Popen", guarded_popen)
+
+
+# Test-wide guard: no test may ever reach a real Ollama (2026-10-04). Running a model on the
+# owner's laptop can take it down, and the reviewer-pin work added Ollama calls to paths the
+# suite already exercises (doctor, assistant start, --imap-setup). Anything aimed at port 11434
+# fails as "connection refused" unless a test installs its own fake urlopen.
+import urllib.error
+import urllib.request
+
+_real_urlopen = urllib.request.urlopen
+
+
+@pytest.fixture(autouse=True)
+def _no_real_ollama(monkeypatch):
+    def guarded_urlopen(url, *a, **kw):
+        target = getattr(url, "full_url", url)
+        if ":11434" in str(target):
+            raise urllib.error.URLError("tests never reach a real Ollama (conftest guard)")
+        return _real_urlopen(url, *a, **kw)
+
+    monkeypatch.setattr(urllib.request, "urlopen", guarded_urlopen)
