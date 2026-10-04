@@ -5,6 +5,7 @@ import json
 import re
 import socket
 import types
+import urllib.error
 import urllib.request
 from datetime import datetime
 from email.message import EmailMessage
@@ -29,9 +30,16 @@ NOW = datetime(2026, 10, 2, 9, 0)
 def _offline(monkeypatch):
     def refuse(*a, **kw):
         raise AssertionError("a test tried to reach the network")
+
+    def ollama_down(url, *a, **kw):
+        # First setup reads the reviewer's digest from Ollama (pin.py); here Ollama is simply down.
+        # Anything else is still the network, and still fails the test.
+        if ":11434" in str(getattr(url, "full_url", url)):
+            raise urllib.error.URLError("ollama is not running (test)")
+        refuse()
     monkeypatch.setattr(imaplib, "IMAP4_SSL", refuse)
     monkeypatch.setattr(socket, "create_connection", refuse)
-    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    monkeypatch.setattr(urllib.request, "urlopen", ollama_down)
     monkeypatch.delenv("HSM_VAULT", raising=False)
 
 

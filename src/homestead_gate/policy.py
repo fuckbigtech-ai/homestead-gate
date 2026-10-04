@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SEPOLIA = 11155111
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 SPEND_WORDS = re.compile(r"\b(pay|pays|paid|payment|payments|invoices?|bills?|tip|tips|reimburse\w*|refund\w*|transfer\w*|wire|settle)\b|\bsend\b[^.\n]{0,40}(\$\s?\d|\d[\d.,]*\s?(eth|usdc|usdt|usd|dollars?|cad)\b)", re.I)
@@ -45,6 +46,11 @@ class Policy:
     ollama_url: str = "http://127.0.0.1:11434"
     review_timeout_s: float = 120
     review_think: bool = False       # [review] think = true: the reviewer reasons first (slower, fewer false blocks)
+    # [review] digest / manifest_digest: the exact reviewer model file (weights blob) and Ollama manifest,
+    # written by `homestead-gate reviewer pin`. Both are rules, so both are in `version`: an approval given
+    # under one model file is never mistaken for one given under another.
+    review_digest: str = ""
+    review_manifest_digest: str = ""
     override_delay_s: float = 60
     approval_timeout_s: float = 300
     _recent: deque = field(default_factory=deque, repr=False)
@@ -66,9 +72,14 @@ class Policy:
             max_actions_per_hour=int(lim.get("max_actions_per_hour", 20)),
             model=rv.get("model", "qwen3.5:9b"), ollama_url=rv.get("ollama_url", "http://127.0.0.1:11434"),
             review_timeout_s=float(rv.get("timeout_s", 120)), review_think=bool(rv.get("think", False)),
+            review_digest=str(rv.get("digest", "")), review_manifest_digest=str(rv.get("manifest_digest", "")),
             override_delay_s=float(ap.get("override_delay_s", 60)),
             approval_timeout_s=float(ap.get("timeout_s", 300)),
         )
+        for key, val in (("digest", p.review_digest), ("manifest_digest", p.review_manifest_digest)):
+            if val and not DIGEST_RE.fullmatch(val):
+                raise ValueError(f"[review] {key} {val!r} is not sha256:<64 hex>; re-pin with "
+                                 "`homestead-gate reviewer pin`")
         if p.chain_id != SEPOLIA:
             # v1 is testnet only. Refusing to load beats a mainnet transaction nobody meant.
             raise ValueError(f"chain_id {p.chain_id} refused: v1 supports Sepolia ({SEPOLIA}) only")

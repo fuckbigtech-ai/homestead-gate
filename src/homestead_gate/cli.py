@@ -9,6 +9,8 @@
   homestead-gate assistant --skill triage                      the personal assistant: cloud brain, local gate
   homestead-gate assistant --watch --every 15m                 always-on: new mail on a schedule, a brief, a notification
   homestead-gate assistant --data DIR --imap-setup             your real inbox, read-only (then --sync, or --watch)
+  homestead-gate reviewer pin                                  pin the reviewer model file (digest) + record a canary baseline
+  homestead-gate reviewer canary                               re-run the frozen canary; exit 1 on drift (weekly, from launchd)
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import hardware, installer
+from . import canary, hardware, installer, pin
 from .approval import NO_MODEL_REASON, TerminalApprover
 from .core import NO_MODEL, Gate
 from .policy import Policy
@@ -82,6 +84,48 @@ def _live_smtp(policy: Policy):
     return smtp, 0
 
 
+def _make_reviewer(policy: Policy, override: bool = False):
+    """The reviewer every gate start uses: Ollama, behind the digest pin. One place, so tests can swap it."""
+    return pin.PinnedReviewer(OllamaReviewer(policy.model, policy.ollama_url, policy.review_timeout_s,
+                                             think=policy.review_think), policy, override=override)
+
+
+def _pin_check(policy: Policy, where: str, override: bool, indent: str = "  ") -> int:
+    """Before a gate starts: is the reviewer the pinned model file? 0 to go on, 2 refused."""
+    c = pin.check(policy)
+    if c.state == "ok":
+        print(f"{indent}pin:      {c.message}")
+        return 0
+    if not c.refuse:            # Ollama down or model not downloaded: nothing can review yet
+        print(f"{indent}pin:      cannot check now ({c.message}). Every review goes to you until the pinned "
+              "model answers.")
+        if not policy.review_digest:
+            print(f"{indent}          not pinned yet; when the model is downloaded: {pin.pin_command(where)}")
+        return 0
+    if override:
+        print(f"{indent}pin:      OVERRIDDEN ({pin.OVERRIDE_FLAG}): {c.message}. Every review receipt records "
+              "the override and the digest actually used.", file=sys.stderr)
+        return 0
+    print(pin.refusal(c, where), file=sys.stderr)
+    return 2
+
+
+def _auto_pin(path: Path, policy: Policy, where: str, indent: str = "  ") -> Policy:
+    """First setup only: pin the reviewer file that is on disk now. Reads two digests; loads nothing."""
+    try:
+        ident = pin.read_identity(policy.ollama_url, policy.model)
+    except pin.PinError as e:
+        print(f"{indent}pin:      not pinned yet ({e}). When it is downloaded: {pin.pin_command(where)}")
+        return policy
+    policy = pin.write_pin(path, ident)
+    print(f"{indent}pin:      pinned the reviewer in {path} (first setup):")
+    for line in pin.describe_pin(ident):
+        print(f"{indent}            {line}")
+    print(f"{indent}            canary baseline not recorded (it runs the model 20 times): "
+          f"homestead-gate reviewer canary --record {where}")
+    return policy
+
+
 def cmd_up(a) -> int:
     """Find the machine, write a policy if there is none, check Ollama and the reviewer
     model, then start the gate. Never downloads or loads a model unless --pull is passed."""
@@ -95,6 +139,7 @@ def cmd_up(a) -> int:
     print("homestead-gate up" + ("  (dry run: nothing is written, pulled or started)" if a.dry_run else ""))
     print(f"  machine:  {hardware.describe(hw)}")
 
+    wrote = False
     if policy_path.exists():
         try:
             policy = Policy.load(policy_path)
@@ -137,6 +182,7 @@ def cmd_up(a) -> int:
             policy = Policy(user_email=email, user_wallet=wallet, model=model)
         else:
             policy = installer.write_policy(policy_path, email, wallet, model)
+            wrote = True
             print(f"            wrote {policy_path}")
 
     smtp = None
@@ -174,6 +220,18 @@ def cmd_up(a) -> int:
             else:
                 print("            not pulled. Run that command, or rerun with --pull.")
 
+    where = f"--policy {policy_path}"
+    if a.dry_run:
+        c = pin.check(policy) if version and present else None
+        if c:
+            print(f"  pin:      {c.message}" + (f"  (would refuse: {pin.pin_command(where)})" if c.refuse else ""))
+    else:
+        if wrote and version and present and not policy.review_digest:
+            policy = _auto_pin(policy_path, policy, where)
+        rc = _pin_check(policy, where, a.allow_unpinned_reviewer)
+        if rc:
+            return rc
+
     task = a.task
     if not task and not a.dry_run:
         task = _ask("  task (what you asked the agent to do; the reviewer trusts only this): ")
@@ -197,7 +255,7 @@ def _serve(policy: Policy, a, task: str, smtp=None) -> int:
     ledger_dir = Path(a.ledger).expanduser()
     session = secrets.token_hex(4)
     gate = Gate(policy=policy,
-                reviewer=OllamaReviewer(policy.model, policy.ollama_url, policy.review_timeout_s, think=policy.review_think),
+                reviewer=_make_reviewer(policy, getattr(a, "allow_unpinned_reviewer", False)),
                 approver=TerminalApprover(override_delay_s=policy.override_delay_s,
                                           timeout_s=policy.approval_timeout_s),
                 ledger_dir=ledger_dir, task=task, session=session,
@@ -252,6 +310,23 @@ def cmd_doctor(a) -> int:
     else:
         rows.append((False, "model", f"{model} not downloaded. Run: {installer.pull_command(model)}"
                                      f"  ({installer.size_note(model)})"))
+    info: list[tuple[str, str]] = []           # shown, never counted as a problem
+    if policy is not None:
+        where = f"--policy {policy_path}"
+        c = pin.check(policy) if version else None
+        if c is None:
+            rows.append((False, "pin", "cannot check: Ollama is not answering"
+                         + ("" if policy.review_digest else f"; not pinned ({pin.pin_command(where)})")))
+        elif c.state in ("unreachable", "absent"):
+            rows.append((False, "pin", f"cannot check: {c.message}"))
+        else:
+            rows.append((c.state == "ok", "pin", c.message + ("" if c.state == "ok"
+                                                              else f". Re-pin on purpose: {pin.pin_command(where)}")))
+        if c is not None and c.identity is not None:
+            info.append(("weights", f"{c.identity.digest}: {pin.measured_note(c.identity.digest)}"))
+        base = canary.load_baseline(policy_path.parent / canary.BASELINE_FILE)
+        info.append(("canary", f"baseline recorded {base.get('recorded_at')} for {pin.short(str(base.get('digest')))}"
+                     if base else f"no baseline. Record: homestead-gate reviewer canary --record {where}"))
     ledger_dir = Path(a.ledger).expanduser()
     lf = ledger_dir / hl.LEDGER_REL
     breaks = hl.verify_chain(vault=ledger_dir)
@@ -269,6 +344,8 @@ def cmd_doctor(a) -> int:
     print(f"homestead-gate doctor   {hardware.describe(hw)}")
     for good, name, detail in rows:
         print(f"  {'ok  ' if good else 'FAIL'}  {name:8} {detail}")
+    for name, detail in info:
+        print(f"  info  {name:8} {detail}")
     bad = sum(1 for g, _, _ in rows if not g)
     print("all good." if not bad else f"{bad} problem(s).")
     return 0 if not bad else 1
@@ -433,18 +510,23 @@ def _assistant_seed(a, data: Path) -> None:
     from .skills import ensure_skills_file
     if asst.seed(data, model=a.model or ASSISTANT_REVIEWER):
         print(f"seeded demo data (fake inbox, bills, memory, policy, skills) in {data}")
+        if not a.no_model:                      # first setup of this data dir: pin the reviewer on disk now
+            _auto_pin(data / "policy.toml", Policy.load(data / "policy.toml"), f"--data {data}", indent="")
     elif ensure_skills_file(data):
         print(f"wrote the default skills to {data / 'skills.toml'}")
 
 
-def _assistant_reviewer(a, policy):
-    """The local reviewer, or None if it does not fit this machine. --no-model loads nothing."""
+def _assistant_reviewer(a, policy, data: Path):
+    """The local reviewer behind its digest pin, or None if it does not fit this machine or is not the
+    pinned model file. --no-model loads nothing and checks nothing."""
     if a.no_model:
         return _NoModelReviewer()
     hw = hardware.detect()
     if not _fits(policy.model, hw, hardware.pick_reviewer(hw)):
         return None
-    return OllamaReviewer(policy.model, policy.ollama_url, policy.review_timeout_s, think=policy.review_think)
+    if _pin_check(policy, f"--data {data}", a.allow_unpinned_reviewer, indent=""):
+        return None
+    return _make_reviewer(policy, a.allow_unpinned_reviewer)
 
 
 def _offer_remember(memory, done: list[tuple[dict, dict]]) -> None:
@@ -496,6 +578,8 @@ def _imap_setup(a, data: Path) -> int:
         wrote = mailbox.prepare_data_dir(data, user, a.model or ASSISTANT_REVIEWER)
         if wrote:
             print(f"  data dir: {data} (wrote {', '.join(wrote)})")
+        if "policy.toml" in wrote:              # first setup: pin the reviewer that is on disk now
+            _auto_pin(data / "policy.toml", Policy.load(data / "policy.toml"), f"--data {data}")
         if mailbox.is_gmail(host):
             print(f"  Gmail wants an app password here, not your normal one: {mailbox.APP_PASSWORDS}")
             print("  (it needs 2-Step Verification on the account)")
@@ -580,7 +664,7 @@ def cmd_assistant(a) -> int:
             policy = asst.load_policy(data, memory)
             if a.model:
                 policy.model = a.model
-            reviewer = _assistant_reviewer(a, policy)
+            reviewer = _assistant_reviewer(a, policy, data)
             if reviewer is None:
                 return 1
             approver = TerminalApprover(override_delay_s=policy.override_delay_s, timeout_s=policy.approval_timeout_s)
@@ -629,7 +713,7 @@ def cmd_assistant(a) -> int:
     policy = asst.load_policy(data, memory)
     if a.model:
         policy.model = a.model
-    reviewer = _assistant_reviewer(a, policy)
+    reviewer = _assistant_reviewer(a, policy, data)
     if reviewer is None:
         return 1
     print(f"task (from you): {task}" + (f"   [skill {skill.name}]" if skill and not a.task else ""))
@@ -729,6 +813,103 @@ def _assistant_smoke(llm) -> int:
     return 0 if calls else 1
 
 
+def _reviewer_target(a) -> tuple[Path, str]:
+    if a.data:
+        d = Path(a.data).expanduser()
+        return d / "policy.toml", f"--data {d}"
+    p = Path(a.policy).expanduser()
+    return p, f"--policy {p}"
+
+
+def cmd_reviewer_pin(a) -> int:
+    """Pin the reviewer model file that is on disk now, on purpose. Prints what it pinned."""
+    path, where = _reviewer_target(a)
+    try:
+        policy = Policy.load(path)
+    except Exception as e:  # noqa: BLE001
+        print(f"reviewer pin: cannot load {path}: {e}", file=sys.stderr)
+        return 2
+    try:
+        ident = pin.read_identity(policy.ollama_url, policy.model)
+    except pin.PinError as e:
+        print(f"reviewer pin: {e}", file=sys.stderr)
+        return 1
+    for line in pin.describe_pin(ident):
+        print(line)
+    if policy.review_digest and policy.review_digest != ident.digest:
+        print(f"replaces: {policy.review_digest}  ({pin.measured_note(policy.review_digest)})")
+    policy = pin.write_pin(path, ident)
+    print(f"pinned in {path}")
+    if a.no_baseline:
+        print(f"canary baseline: not recorded (--no-baseline). Record it: homestead-gate reviewer canary --record {where}")
+        return 0
+    return _canary(policy, path, where, record=True, min_agreement=canary.DEFAULT_MIN_AGREEMENT)
+
+
+def cmd_reviewer_canary(a) -> int:
+    path, where = _reviewer_target(a)
+    try:
+        policy = Policy.load(path)
+    except Exception as e:  # noqa: BLE001
+        print(f"reviewer canary: cannot load {path}: {e}", file=sys.stderr)
+        return canary.EXIT_PIN
+    return _canary(policy, path, where, record=a.record, min_agreement=a.min_agreement)
+
+
+def _canary(policy: Policy, path: Path, where: str, *, record: bool, min_agreement: float) -> int:
+    import time as _t
+    c = pin.check(policy)
+    if c.state != "ok":                          # before anything loads
+        print(f"canary: not run. {c.message}." + (f" Re-pin on purpose: {pin.pin_command(where)}" if c.refuse else ""),
+              file=sys.stderr)
+        return canary.EXIT_PIN
+    cases = canary.load_cases()
+    base_path = path.parent / canary.BASELINE_FILE
+    ident = canary.identity_record(model=policy.model, digest=c.identity.digest,
+                                   manifest_digest=c.identity.manifest_digest, think=policy.review_think)
+    baseline = None
+    if not record:
+        baseline = canary.load_baseline(base_path)
+        if baseline is None:
+            print(f"canary: no baseline at {base_path}. Record one: homestead-gate reviewer canary --record {where}",
+                  file=sys.stderr)
+            return canary.EXIT_BASELINE
+        diff = canary.stale(baseline, ident)
+        if diff:
+            print("canary: the baseline was recorded for a different reviewer; not comparing.", file=sys.stderr)
+            for d in diff:
+                print(f"  {d}", file=sys.stderr)
+            print(f"  Re-record on purpose: homestead-gate reviewer canary --record {where}", file=sys.stderr)
+            return canary.EXIT_BASELINE
+    hw = hardware.detect()
+    if not _fits(policy.model, hw, hardware.pick_reviewer(hw)):      # the canary loads the model
+        return canary.EXIT_PIN
+    print(f"canary: {len(cases)} frozen GateBench test cases through {policy.model} "
+          f"({pin.short(c.identity.digest)}, prompt {canary.PROMPT_VERSION}, think {'on' if policy.review_think else 'off'})")
+    verdicts = canary.run(_make_reviewer(policy), cases, log=print)
+    entry = {**ident, "at": _t.strftime("%Y-%m-%dT%H:%M:%S%z"), "mode": "record" if record else "compare",
+             "verdicts": verdicts, "scores": canary.scores(verdicts, cases)}
+    history = path.parent / canary.HISTORY_FILE
+    if record:
+        try:
+            base = canary.record(base_path, ident, verdicts, cases)
+        except canary.CanaryError as e:
+            print(f"canary: {e}", file=sys.stderr)
+            canary.append_history(history, {**entry, "result": "record_failed"})
+            return canary.EXIT_DRIFT
+        canary.append_history(history, {**entry, "result": "recorded"})
+        s = base["scores"]
+        print(f"baseline recorded in {base_path}: attacks blocked {s['attacks_blocked']}, "
+              f"legit blocked {s['legit_blocked']}")
+        return canary.EXIT_OK
+    rep = canary.compare(baseline, verdicts, cases, min_agreement)
+    for line in rep.lines():
+        print(line)
+    canary.append_history(history, {**entry, "result": "ok" if rep.ok else "drift", "agreement": rep.agreement,
+                                    "changed": [i for i, *_ in rep.changed], "unsafe": rep.unsafe})
+    return canary.EXIT_OK if rep.ok else canary.EXIT_DRIFT
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="homestead-gate", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -747,6 +928,8 @@ def main(argv=None) -> int:
     u.add_argument("--pull", action="store_true",
                    help="download the reviewer model if missing (through model-load-guard when on PATH)")
     u.add_argument("--dry-run", action="store_true", help="show what would happen; write, pull and start nothing")
+    u.add_argument(pin.OVERRIDE_FLAG, dest="allow_unpinned_reviewer", action="store_true",
+                   help="start even if the reviewer is not the pinned model file (recorded in every review receipt)")
     u.set_defaults(func=cmd_up)
 
     dr = sub.add_parser("doctor", help="one-screen health check; exits 1 if anything is missing")
@@ -805,6 +988,8 @@ def main(argv=None) -> int:
     asp.add_argument("--llm-model", help="override the backend's model")
     asp.add_argument("--model", help="local reviewer model (default: the data dir's policy)")
     asp.add_argument("--no-model", action="store_true", help="no local reviewer: every non-self action asks you")
+    asp.add_argument(pin.OVERRIDE_FLAG, dest="allow_unpinned_reviewer", action="store_true",
+                     help="run even if the reviewer is not the pinned model file (recorded in every review receipt)")
     asp.add_argument("--live", action="store_true", help="really send approved email with the gate's stored credentials")
     asp.add_argument("--max-steps", type=int, default=12)
     asp.add_argument("--unguarded-prompt", action="store_true",
@@ -821,6 +1006,22 @@ def main(argv=None) -> int:
     cs.set_defaults(func=cmd_creds_set)
     crs.add_parser("status").set_defaults(func=lambda a: (print(__import__("homestead_gate.credstore", fromlist=["status"]).status()), 0)[1])
     crs.add_parser("clear").set_defaults(func=cmd_creds_clear)
+
+    rv = sub.add_parser("reviewer", help="model risk: pin the reviewer model file, check it for drift")
+    rvs = rv.add_subparsers(dest="rvcmd", required=True)
+    rp = rvs.add_parser("pin", help="pin the reviewer's digest in the policy (prints model, digest, size), "
+                                    "then record the canary baseline")
+    rcn = rvs.add_parser("canary", help="run the frozen canary through the pinned reviewer and compare with the "
+                                        "baseline; exit 0 ok, 1 drift, 2 not the pinned file, 3 no/stale baseline")
+    for x in (rp, rcn):
+        x.add_argument("--policy", default=str(HOME / "policy.toml"))
+        x.add_argument("--data", help="an assistant data dir: use DIR/policy.toml")
+    rp.add_argument("--no-baseline", action="store_true", help="pin only; do not run the model")
+    rp.set_defaults(func=cmd_reviewer_pin)
+    rcn.add_argument("--record", action="store_true", help="(re)record the baseline instead of comparing")
+    rcn.add_argument("--min-agreement", type=float, default=canary.DEFAULT_MIN_AGREEMENT,
+                     help=f"fail below this share of unchanged verdicts (default {canary.DEFAULT_MIN_AGREEMENT})")
+    rcn.set_defaults(func=cmd_reviewer_canary)
 
     w = sub.add_parser("watch", help="show the receipts; exits 1 if the chain is broken")
     w.add_argument("--ledger", default=str(HOME / "ledger"))

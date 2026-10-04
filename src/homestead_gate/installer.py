@@ -1,7 +1,8 @@
 """Setup pieces behind `homestead-gate up` and `homestead-gate doctor`.
 
-Ollama is only ever asked two read-only questions: /api/version (is it running) and
-/api/tags (which models are on disk). Neither loads a model into memory. Downloading a
+Ollama is only ever asked three read-only questions: /api/version (is it running),
+/api/tags (which models are on disk, with their manifest digests) and /api/show (the
+modelfile, whose FROM line names the weights blob; pin.py). None loads a model into memory. Downloading a
 model happens only through pull(), which the CLI calls only when --pull is passed, and
 which goes through `model-load-guard` first when that tool is on PATH.
 """

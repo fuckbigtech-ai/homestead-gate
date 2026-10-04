@@ -1,6 +1,7 @@
 """Always-on passes, held approvals, user-defined skills and memory from the CLI.
 No network, no model loads, no real notifications."""
 import json
+import urllib.error
 import urllib.request
 from datetime import datetime
 
@@ -25,7 +26,14 @@ REAL_FROM_PRESET = ChatClient.from_preset
 def _guards(monkeypatch):
     def refuse(*a, **kw):
         raise AssertionError("a test tried to reach the network")
-    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+
+    def ollama_down(url, *a, **kw):
+        # First setup reads the reviewer's digest from Ollama (pin.py); here Ollama is simply down.
+        # Anything else is still the network, and still fails the test.
+        if ":11434" in str(getattr(url, "full_url", url)):
+            raise urllib.error.URLError("ollama is not running (test)")
+        refuse()
+    monkeypatch.setattr(urllib.request, "urlopen", ollama_down)
     monkeypatch.delenv("HSM_VAULT", raising=False)
     shown = []
     # no test may pop a real desktop notification: swap notify, and fail loudly if anything still

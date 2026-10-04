@@ -478,5 +478,10 @@ def test_cli_assistant_runs_end_to_end(tmp_path, monkeypatch):
         lambda cls, name, **kw: original(name, api_key=KEY, transport=ScriptedLLM(done()))))
     monkeypatch.setattr(cli, "_fits", lambda *a, **k: True)
     monkeypatch.setenv("NEBIUS_API_KEY", KEY)
+    from fake_ollama import NANO_GGUF, FakeOllama       # tags + show only; a chat call fails the test
+    monkeypatch.setattr(urllib.request, "urlopen", FakeOllama(["nemotron-3-nano:4b"],
+                                                              blobs={"nemotron-3-nano:4b": NANO_GGUF}))
     assert cli_main(["assistant", "--skill", "pay", "--data", str(tmp_path / "d")]) == 0
-    assert 'model = "nemotron-3-nano:4b"' in (tmp_path / "d" / "policy.toml").read_text()
+    text = (tmp_path / "d" / "policy.toml").read_text()
+    assert 'model = "nemotron-3-nano:4b"' in text
+    assert f'digest = "sha256:{NANO_GGUF}"' in text           # seeding the data dir pinned the reviewer
