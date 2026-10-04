@@ -427,3 +427,10 @@ def test_measured_table_holds_only_sourced_full_digests():
     for d in pin.MEASURED:
         assert re.fullmatch(r"sha256:[0-9a-f]{64}", d)
     assert not any(d.startswith("sha256:527db2") for d in pin.MEASURED)      # no run log records it
+
+
+def test_model_risk_doc_states_the_shipped_prompt_and_measured_files():
+    doc = (ROOT / "MODEL_RISK.md").read_text()
+    assert f"sha256 `{reviewer.PROMPT_SHA256}`" in doc            # the doc names the prompt that ships
+    assert set(re.findall(r"`(sha256:[0-9a-f]{64})`", doc)) == set(pin.MEASURED)
+    assert "--allow-unpinned-reviewer" in doc and pin.OVERRIDE_FLAG == "--allow-unpinned-reviewer"
