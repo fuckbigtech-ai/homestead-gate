@@ -200,14 +200,15 @@ def _set_review_keys(text: str, values: dict[str, str], note: str) -> str:
         lines += ["", "[review]"]
         head = len(lines) - 1
     end = next((i for i in range(head + 1, len(lines)) if re.match(r"^\s*\[", lines[i])), len(lines))
+    after = next((i for i in range(head + 1, end) if re.match(r"^\s*model\s*=", lines[i])), head)
     for key, val in values.items():
         line = f"{key} = {json.dumps(val)}" + (f"   # {note}" if key == "digest" else "")
         hit = next((i for i in range(head + 1, end) if re.match(rf"^\s*{key}\s*=", lines[i])), None)
         if hit is not None:
-            lines[hit] = line
+            lines[hit], after = line, hit
             continue
-        after = next((i for i in range(head + 1, end) if re.match(r"^\s*model\s*=", lines[i])), head)
-        lines.insert(after + 1, line)
+        after += 1
+        lines.insert(after, line)
         end += 1
     return "\n".join(lines) + "\n"
 
