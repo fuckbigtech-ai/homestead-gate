@@ -84,7 +84,8 @@ class HoldApprover:
     def __init__(self):
         self.held: list[str] = []
 
-    def ask(self, *, rid: str, action: dict, flagged: bool, review_reason: str, span: str) -> HumanDecision:
+    def ask(self, *, rid: str, action: dict, flagged: bool, review_reason: str, span: str,
+            context: dict | None = None) -> HumanDecision:
         self.held.append(rid)
         return HumanDecision("expired", HELD, 0.0)
 
@@ -105,7 +106,7 @@ def save_pending(data: Path, items: list[dict]) -> None:
 
 
 def resolve_pending(data: Path, *, policy_factory: Callable[[], object], reviewer, approver,
-                    log: Callable[[str], None] = print) -> list[dict]:
+                    log: Callable[[str], None] = print, lookup=None) -> list[dict]:
     """Put each held item through the full gate again (policy, reviewer, the terminal approver).
     Items the human answered leave the queue; an unanswered one stays. Returns
     [{"item", "result"}]."""
@@ -123,7 +124,8 @@ def resolve_pending(data: Path, *, policy_factory: Callable[[], object], reviewe
         policy = policy_factory()
         asst.replay_auto_spend(policy, data / "ledger")
         gate = Gate(policy=policy, reviewer=reviewer, approver=approver, ledger_dir=data / "ledger",
-                    task=str(item.get("task", "")), session=secrets.token_hex(4), outbox=data / "outbox")
+                    task=str(item.get("task", "")), session=secrets.token_hex(4), outbox=data / "outbox",
+                    lookup=lookup)
         log(f"held {item.get('created', '?')} by skill {item.get('skill', '?')}: "
             f"{_what(item.get('action') or {})}")
         res = gate.submit({"action": item.get("action") or {}, "read": item.get("reads") or []})

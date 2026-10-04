@@ -40,6 +40,7 @@ from homestead_memory.core import ledger
 
 from homestead_gate import always_on
 from homestead_gate import assistant as asst
+from homestead_gate import lookup as web_lookup
 from homestead_gate import skills as skills_mod
 from homestead_gate.core import Gate
 from homestead_gate.llm import LLMError
@@ -269,8 +270,12 @@ class App:
                  session_runs_per_hour: int = SESSION_RUNS_PER_HOUR,
                  max_concurrent: int = MAX_CONCURRENT_RUNS, max_sessions: int = MAX_SESSIONS,
                  session_ttl_s: float = SESSION_TTL_S, token_budget: int = RUN_TOKEN_BUDGET,
-                 approval_timeout_s: float = APPROVAL_TIMEOUT_S, override_delay_s: float = OVERRIDE_DELAY_S):
+                 approval_timeout_s: float = APPROVAL_TIMEOUT_S, override_delay_s: float = OVERRIDE_DELAY_S,
+                 lookup_factory=None):
         self.root = Path(root or tempfile.mkdtemp(prefix="hg-web-demo-")).resolve()
+        # Web lookup of unknown recipients (homestead_gate.lookup): on only if TAVILY_API_KEY is set
+        # (locally, or by the Modal secret). Each gate gets its own cache, so sessions share nothing.
+        self.lookup_factory = lookup_factory or (lambda: web_lookup.from_env(os.environ))
         self.root.mkdir(parents=True, exist_ok=True)
         self.clock = clock
         self.brain_factory = brain_factory or self._default_brain
@@ -531,7 +536,8 @@ class App:
         run.approver = approver
         asst.replay_auto_spend(policy, s.ledger_dir)
         gate = Gate(policy=policy, reviewer=reviewer, approver=approver, ledger_dir=s.ledger_dir,
-                    task=run.task, session=run.id, outbox=data / "outbox", smtp=None, live=False)
+                    task=run.task, session=run.id, outbox=data / "outbox", smtp=None, live=False,
+                    lookup=self.lookup_factory())
         run.emit("start", self._start_info(run, unguarded, injection, brain, reviewer))
         bot = WebAssistant(llm=brain, submit=self._submitter(s, run, gate.submit, reviewer, rules), data_dir=data,
                            memory=asst.AssistantMemory(data / "memory"), task=run.task, max_steps=MAX_STEPS,

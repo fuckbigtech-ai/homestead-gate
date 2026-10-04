@@ -192,6 +192,17 @@ def cmd_up(a) -> int:
     return _serve(policy, a, task, smtp)
 
 
+def _web_lookup(policy: Policy):
+    """Tavily lookup of unknown recipients for the approval card, or None (off: the default)."""
+    from . import lookup
+    lk = lookup.from_policy(policy)
+    if policy.lookup_tavily:
+        print("  web lookup: " + ("on (Tavily; sends only the recipient's domain or wallet address, "
+                                  "results are for you, never the reviewer)" if lk else
+                                  "[lookup] tavily is on but no key is stored (service tavily-api-key); off"))
+    return lk
+
+
 def _serve(policy: Policy, a, task: str, smtp=None) -> int:
     live = smtp is not None
     ledger_dir = Path(a.ledger).expanduser()
@@ -201,7 +212,7 @@ def _serve(policy: Policy, a, task: str, smtp=None) -> int:
                 approver=TerminalApprover(override_delay_s=policy.override_delay_s,
                                           timeout_s=policy.approval_timeout_s),
                 ledger_dir=ledger_dir, task=task, session=session,
-                outbox=HOME / "outbox", smtp=smtp, live=live)
+                outbox=HOME / "outbox", smtp=smtp, live=live, lookup=_web_lookup(policy))
     from .daemon import make_server
     srv = make_server(gate, port=a.port)
     print(f"homestead-gate on 127.0.0.1:{a.port}  session {session}")
@@ -312,6 +323,17 @@ def cmd_creds_set(a) -> int:
     except credstore.CredentialError as e:
         print(f"not stored: {e}", file=sys.stderr); return 2
     print(credstore.status())
+    return 0
+
+
+def cmd_creds_set_tavily(a) -> int:
+    from . import credstore
+    try:
+        print("storing the Tavily key as service tavily-api-key. the OS will ask for it; it never passes through here.")
+        credstore.store_tavily()
+    except credstore.CredentialError as e:
+        print(f"not stored: {e}", file=sys.stderr); return 2
+    print("stored. turn the lookup on with [lookup] tavily = true in your policy.toml.")
     return 0
 
 
@@ -581,7 +603,8 @@ def cmd_assistant(a) -> int:
                 if a.model:
                     p.model = a.model
                 return p
-            results = always_on.resolve_pending(data, policy_factory=fresh, reviewer=reviewer, approver=approver)
+            results = always_on.resolve_pending(data, policy_factory=fresh, reviewer=reviewer, approver=approver,
+                                                lookup=_web_lookup(policy))
             for r in results:
                 print(f"  -> {r['result'].get('status')}" + (f" by {r['result']['by']}" if r["result"].get("by") else ""))
             _offer_remember(memory, [(r["item"].get("action") or {}, r["result"]) for r in results])
@@ -675,7 +698,7 @@ def cmd_assistant(a) -> int:
                 approver=TerminalApprover(override_delay_s=policy.override_delay_s,
                                           timeout_s=policy.approval_timeout_s),
                 ledger_dir=ledger_dir, task=task, session=secrets.token_hex(4),
-                outbox=data / "outbox", smtp=smtp, live=smtp is not None)
+                outbox=data / "outbox", smtp=smtp, live=smtp is not None, lookup=_web_lookup(policy))
     print(f"  autonomous wallet spending so far today: {spent:g} of {policy.daily_auto_value_eth:g} ETH")
     print("  email is LIVE" if smtp else f"  email is DRY-RUN: approved messages land in {data / 'outbox'}")
     bot = asst.Assistant(llm=llm, submit=gate.submit, data_dir=data, memory=memory, task=task,
@@ -812,6 +835,8 @@ def main(argv=None) -> int:
     cs.set_defaults(func=cmd_creds_set)
     crs.add_parser("status").set_defaults(func=lambda a: (print(__import__("homestead_gate.credstore", fromlist=["status"]).status()), 0)[1])
     crs.add_parser("clear").set_defaults(func=cmd_creds_clear)
+    crs.add_parser("set-tavily", help="store a Tavily API key for the optional web lookup of unknown "
+                   "recipients; you type it into the OS prompt").set_defaults(func=cmd_creds_set_tavily)
 
     w = sub.add_parser("watch", help="show the receipts; exits 1 if the chain is broken")
     w.add_argument("--ledger", default=str(HOME / "ledger"))

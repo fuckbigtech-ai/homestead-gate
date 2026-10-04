@@ -340,6 +340,29 @@ function ruleBlock(rule) {
   return b;
 }
 
+// What the web says about a recipient you have no record of (Tavily). Untrusted web text: shown to
+// you only, never to the reviewer, and it changes nothing about the decision. Built with el(), which
+// sets textContent only, and URLs are shown as text, not links.
+function lookupBlock(lk) {
+  if (!lk) return null;
+  const b = el("div", "block lookup");
+  if (!lk.ok) {
+    b.append(el("div", "block-label", "Web lookup"), el("div", "sub", lk.label || "web lookup unavailable"));
+    return b;
+  }
+  b.append(el("div", "block-label", lk.label || "What the web says"));
+  b.append(el("div", "sub", lk.warning || "Untrusted web text. Shown to you only; the reviewer never sees it."));
+  const results = (lk.results || []).slice(0, 3);
+  if (!results.length) b.append(el("div", "", "No results."));
+  for (const r of results) {
+    const row = el("div", "lookup-row");
+    row.append(el("div", "lookup-title", r.title || "(no title)"), el("div", "lookup-url", r.url || ""));
+    if (r.snippet) row.append(el("div", "lookup-snippet", r.snippet));
+    b.append(row);
+  }
+  return b;
+}
+
 function receiptBlock(receipts, extraLabel) {
   const b = el("div", "block");
   b.append(el("div", "block-label", extraLabel || "Receipts so far (written before anything runs)"));
@@ -360,6 +383,8 @@ function onApproval(d) {
   card.append(head, actionList(d.action, d.to_label));
   card.append(reviewBlock(d.verdict || (d.flagged ? "block" : "approve"), d.review_reason, d.span, d.reviewer_model));
   card.append(ruleBlock(d.rule));
+  const lookup = lookupBlock(d.web_lookup);
+  if (lookup) card.append(lookup);
   const receipts = receiptBlock(d.receipts);
   card.append(receipts);
 

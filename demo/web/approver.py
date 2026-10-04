@@ -45,7 +45,8 @@ class WebApprover:
         self._closed = False
 
     # -- the gate's side
-    def ask(self, *, rid: str, action: dict, flagged: bool, review_reason: str, span: str) -> HumanDecision:
+    def ask(self, *, rid: str, action: dict, flagged: bool, review_reason: str, span: str,
+            context: dict | None = None) -> HumanDecision:
         t0 = time.time()
         p = _Pending(rid=rid, flagged=bool(flagged), shown_at=self.clock())
         with self._lock:
@@ -55,6 +56,8 @@ class WebApprover:
         try:
             self.on_ask({"rid": rid, "action": action, "flagged": bool(flagged),
                          "review_reason": review_reason, "span": span,
+                         # untrusted web text about an unknown recipient, for the human's card only
+                         "web_lookup": (context or {}).get("web_lookup"),
                          "timeout_s": self.timeout_s, "deadline": time.time() + self.timeout_s,
                          "override_delay_s": self.override_delay_s if flagged else 0})
         except Exception:  # noqa: BLE001 - a broken page must not turn into a yes

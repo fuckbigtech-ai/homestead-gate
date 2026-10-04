@@ -1,6 +1,7 @@
 """Serve the web demo on Modal as a CPU web endpoint. NOT RUN YET: deploying is a human decision.
 
   modal secret create nebius-token-factory NEBIUS_API_KEY=...   # once, by a human
+  modal secret create tavily TAVILY_API_KEY=...                 # optional: web lookup of unknown recipients
   modal deploy demo/web/modal_app.py                            # run from the repo root
 
 The models run elsewhere (Nebius Token Factory), so this container needs no GPU. Sessions live in
@@ -27,7 +28,24 @@ image = (modal.Image.debian_slim(python_version="3.12")
 app = modal.App("homestead-web-demo", image=image)
 
 
-@app.function(secrets=[modal.Secret.from_name("nebius-token-factory")], cpu=1.0, memory=1024,
+def _optional_secrets(name: str) -> list:
+    """The Modal secret `name` if it exists, else nothing. For the optional Tavily web lookup:
+      modal secret create tavily TAVILY_API_KEY=...     # once, by a human; omit to keep it off
+    The server turns the lookup on only when TAVILY_API_KEY is in its environment. Any failure here
+    (no such secret, no network, an older modal) leaves it off, which is the safe side.
+    UNVERIFIED: not run against Modal yet (modal is not installed where this was written)."""
+    if not modal.is_local():
+        return []
+    try:
+        secret = modal.Secret.from_name(name)
+        secret.hydrate()
+        return [secret]
+    except Exception:  # noqa: BLE001 - absent means off
+        return []
+
+
+@app.function(secrets=[modal.Secret.from_name("nebius-token-factory"), *_optional_secrets("tavily")],
+              cpu=1.0, memory=1024,
               max_containers=1, timeout=24 * 3600)
 @modal.concurrent(max_inputs=100)
 @modal.web_server(PORT, startup_timeout=60)

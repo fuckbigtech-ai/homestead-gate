@@ -47,6 +47,9 @@ class Policy:
     review_think: bool = False       # [review] think = true: the reviewer reasons first (slower, fewer false blocks)
     override_delay_s: float = 60
     approval_timeout_s: float = 300
+    # [lookup] tavily = true: web lookup of unknown recipients, shown to the human only (lookup.py).
+    # Also needs the key in the OS credential store. Off by default.
+    lookup_tavily: bool = False
     _recent: deque = field(default_factory=deque, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _auto_spent: deque = field(default_factory=deque, repr=False)   # (time, eth) auto-approved in 24h
@@ -56,6 +59,7 @@ class Policy:
         d = tomllib.loads(Path(path).read_text())
         u, e, v = d.get("user", {}), d.get("email", {}), d.get("evm", {})
         lim, rv, ap = d.get("limits", {}), d.get("review", {}), d.get("approval", {})
+        lk = d.get("lookup", {})
         p = cls(
             user_email=u.get("email", ""), user_wallet=u.get("wallet", ""),
             email_allow=list(e.get("allow", [])), evm_allow=list(v.get("allow", [])),
@@ -68,6 +72,7 @@ class Policy:
             review_timeout_s=float(rv.get("timeout_s", 120)), review_think=bool(rv.get("think", False)),
             override_delay_s=float(ap.get("override_delay_s", 60)),
             approval_timeout_s=float(ap.get("timeout_s", 300)),
+            lookup_tavily=lk.get("tavily", False) is True,
         )
         if p.chain_id != SEPOLIA:
             # v1 is testnet only. Refusing to load beats a mainnet transaction nobody meant.

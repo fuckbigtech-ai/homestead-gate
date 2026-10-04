@@ -12,6 +12,7 @@ the human gave when starting the gate, because a hijacked agent would lie about 
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import uuid
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import Protocol
 from homestead_memory.core import ledger
 
 from . import adapters
+from . import lookup as web_lookup
 from .approval import HumanDecision
 from .policy import Policy
 from .reviewer import Verdict, render
@@ -32,7 +34,20 @@ class Reviewer(Protocol):
 
 
 class Approver(Protocol):
-    def ask(self, *, rid: str, action: dict, flagged: bool, review_reason: str, span: str) -> HumanDecision: ...
+    # context (optional): extra information for the human's eyes only, e.g. {"web_lookup": {...}}.
+    # An approver written before it existed simply does not take it, and the gate does not pass it.
+    def ask(self, *, rid: str, action: dict, flagged: bool, review_reason: str, span: str,
+            context: dict | None = None) -> HumanDecision: ...
+
+
+def _takes_context(fn) -> bool:
+    """Checked from the signature, never by calling and catching TypeError: a TypeError from inside
+    ask() must not get the human asked twice."""
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.name == "context" or p.kind is p.VAR_KEYWORD for p in params)
 
 
 # The fields that decide what an action DOES, chosen by code per type, never by the model.
@@ -63,8 +78,13 @@ def describe(action: dict) -> str:
 
 class Gate:
     def __init__(self, *, policy: Policy, reviewer: Reviewer, approver: Approver, ledger_dir: Path,
-                 task: str, session: str, outbox: Path, smtp: dict | None = None, live: bool = False):
+                 task: str, session: str, outbox: Path, smtp: dict | None = None, live: bool = False,
+                 lookup: "web_lookup.TavilyLookup | None" = None):
         self.policy, self.reviewer, self.approver = policy, reviewer, approver
+        # Optional web lookup of unknown recipients (lookup.py). None means off. Its results are
+        # for the human only; see _recipient_context.
+        self.lookup = lookup
+        self._lookup_cache: dict[tuple[str, str], web_lookup.LookupResult] = {}   # per target, per session
         self.ledger_dir, self.task, self.session = Path(ledger_dir), task, session
         self.outbox, self.smtp, self.live = Path(outbox), smtp, live
         # payload hashes refused in this session (denied, blocked or unanswered). An identical retry is
@@ -75,6 +95,40 @@ class Gate:
     def _log(self, action: str, summary: str, meta: dict, phase: str, target: str) -> None:
         ledger.append(action, target=target, summary=summary, meta=meta, vault=self.ledger_dir,
                       agent=AGENT, session=self.session, phase=phase)
+
+    def _recipient_context(self, action: dict, pre) -> dict | None:
+        """What the web says about an unknown recipient, for the approval card. None for a known contact.
+
+        TRUST RULE: this is untrusted web text. It goes ONLY to the human (approver.ask's context).
+        It is computed after the reviewer has answered and is never passed to render() or the
+        reviewer, never returned from submit() (so the agent never sees it), and never changes the
+        policy outcome or the verdict. Only the domain or wallet address is sent to Tavily. The
+        ledger records that a lookup happened, not what it said."""
+        if web_lookup.is_known(action, self.policy):
+            return None
+        t = web_lookup.target_of(action)
+        kind, target = t if t else ("domain" if action.get("type") == "email" else "wallet", "")
+        if self.lookup is None:
+            return {"web_lookup": web_lookup.unavailable(kind, target, "not configured").card()}
+        if t is None:
+            return {"web_lookup": web_lookup.unavailable(kind, target,
+                                                         "recipient is not one clean address").card()}
+        res = self._lookup_cache.get(t)
+        if res is None:
+            try:
+                res = self.lookup.search(kind, target)
+            except Exception as e:  # noqa: BLE001 - search() never raises; fail safe regardless
+                res = web_lookup.unavailable(kind, target, f"error ({type(e).__name__})")
+            if res.ok:
+                self._lookup_cache[t] = res      # a success is reused this session; a failure is retried
+            pre("gate.lookup", f"web lookup {kind} {target}: " + (
+                f"{len(res.results)} results" if res.ok else "unavailable"), **res.receipt())
+        return {"web_lookup": res.card()}
+
+    def _ask(self, context: dict | None, **kw) -> HumanDecision:
+        if context is not None and _takes_context(self.approver.ask):
+            return self.approver.ask(**kw, context=context)
+        return self.approver.ask(**kw)
 
     def submit(self, request: dict) -> dict:
         action = dict(request.get("action") or {})
@@ -127,8 +181,10 @@ class Gate:
                 decided_by, decision, reason = "policy", "approve", auto_why
                 self.policy.record_auto(action)
             else:
-                h = self.approver.ask(rid=rid, action=action, flagged=verdict.flagged,
-                                      review_reason=verdict.reason, span=verdict.span)
+                # The review above is finished; the lookup cannot reach it (see _recipient_context).
+                context = self._recipient_context(action, pre)
+                h = self._ask(context, rid=rid, action=action, flagged=verdict.flagged,
+                              review_reason=verdict.reason, span=verdict.span)
                 decided_by, decision, reason = f"human:{h.channel}", h.decision, (
                     "overrode the model's flag" if h.overrode_flag else f"human {h.decision}")
                 pre("gate.decision", f"human:{h.decision}" + (" (overrode flag)" if h.overrode_flag else ""),
