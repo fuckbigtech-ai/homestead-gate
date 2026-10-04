@@ -155,7 +155,9 @@ def prepare_data_dir(data: Path, user_email: str, model: str) -> list[str]:
     if not (data / "policy.toml").exists():
         email_line = f'email = "{user_email}"\n' if "@" in user_email else ""
         _write_private(data / "policy.toml", "# homestead assistant policy for your real inbox\n"
-                       f"[user]\n{email_line}\n[review]\nmodel = \"{model}\"\n")
+                       f"[user]\n{email_line}\n[review]\nmodel = \"{model}\"\n"
+                       "# the reviewer reasons before its verdict (slower, far fewer false blocks); false = faster\n"
+                       "think = true\n")
         wrote.append("policy.toml")
     if skills_mod.ensure_skills_file(data):
         wrote.append("skills.toml")

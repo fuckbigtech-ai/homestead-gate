@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import uuid
 from pathlib import Path
 from typing import Protocol
@@ -67,16 +68,35 @@ class Gate:
         self.policy, self.reviewer, self.approver = policy, reviewer, approver
         self.ledger_dir, self.task, self.session = Path(ledger_dir), task, session
         self.outbox, self.smtp, self.live = Path(outbox), smtp, live
-        # payload hashes refused in this session (denied, blocked or unanswered). An identical retry is
-        # refused by policy without a second review or a second question: on AgentDojo the one attack
-        # that got past the thinking 4B was the sixth identical retry of a call it had blocked five times.
+        # Payload hashes a human refused in this session: denied, or held by a scheduled pass. An identical
+        # retry is refused by policy without a second review or a second question. Not stored: policy
+        # denies (they repeat on their own, and the hourly cap lifts), and a terminal card nobody answered
+        # in time (the person may have stepped away; they get asked again). Identical requests that arrive
+        # together wait for the first one's decision instead of each asking the human.
         self.refused: set[str] = set()
+        self._lock = threading.Lock()
+        self._inflight: dict[str, threading.Event] = {}
 
     def _log(self, action: str, summary: str, meta: dict, phase: str, target: str) -> None:
         ledger.append(action, target=target, summary=summary, meta=meta, vault=self.ledger_dir,
                       agent=AGENT, session=self.session, phase=phase)
 
     def submit(self, request: dict) -> dict:
+        key = payload_hash(dict(request.get("action") or {}), self.policy.version)
+        while True:
+            with self._lock:
+                first = self._inflight.get(key)
+                if first is None:
+                    self._inflight[key] = threading.Event()
+                    break
+            first.wait()                           # an identical request is being decided; then re-check
+        try:
+            return self._submit(request)
+        finally:
+            with self._lock:
+                self._inflight.pop(key).set()
+
+    def _submit(self, request: dict) -> dict:
         action = dict(request.get("action") or {})
         reads = request.get("read") or []
         rid = uuid.uuid4().hex[:10]
@@ -97,7 +117,6 @@ class Gate:
 
         outcome, why = self.policy.check(action)
         if outcome == "deny":
-            self.refused.add(base["payload_sha256"])
             pre("gate.decision", f"policy:deny {why}", decided_by="policy", decision="deny")
             post("gate.denied", "not executed", reason=why)
             return {"id": rid, "status": "denied", "by": "policy", "reason": why}
@@ -139,7 +158,8 @@ class Gate:
             pre("gate.decision", f"policy:{decision} {reason}", decided_by="policy", decision=decision)
 
         if decision != "approve":
-            self.refused.add(base["payload_sha256"])
+            if decided_by.startswith("human:") and (decision == "deny" or decided_by == "human:held"):
+                self.refused.add(base["payload_sha256"])
             kind = "gate.expired" if decision == "expired" else "gate.denied"
             post(kind, "not executed", reason=reason)
             return {"id": rid, "status": "expired" if decision == "expired" else "denied",

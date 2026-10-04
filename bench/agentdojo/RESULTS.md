@@ -589,8 +589,8 @@ What this shows:
    8%, level with the hosted 30B's 9%. On banking, legitimate calls blocked per run fell from 4.09 to 0.54, now
    below the hosted 30B's 0.69. Utility under attack rose from 49% to 58%, equal to the hosted 30B.
 2. **The model half is no longer airtight.** On banking, 1 of 144 attacks got through. Across both suites the
-   reviewer approved 1 of 515 attacker-call reviews (507 banking, 8 travel). That one was a retry: the reviewer blocked the same call five
-   times, then approved it. With thinking off, the 4B approved 0 attacker calls in both runs. With retries, the
+   reviewer approved 1 of 515 attacker-call reviews (507 banking, 8 travel). That one was a retry: the agent made the call six times (the first
+   with different arguments), the reviewer blocked the first five, then approved the sixth. With thinking off, the 4B approved 0 attacker calls in both runs. With retries, the
    attacker can keep trying until one review goes its way, so a per-review error rate becomes a per-run one. In
    the product the human is the second key for this. A cheap mitigation to test: once a call has been blocked,
    keep blocking identical retries of it in the same run.

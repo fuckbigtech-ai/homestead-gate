@@ -417,3 +417,11 @@ def test_unanswered_keychain_dialog_fails_the_sync_not_the_pass(tmp_path, monkey
                            sync=lambda: mailbox.sync_configured(data, connect=FakeIMAP()))
     assert p.sync_failed and "did not answer within" in p.sync and p.error is None and not p.skipped
     assert notes == ["mail sync failed, see the brief; 0 new, 0 done, 0 waiting for you"]
+
+
+def test_a_real_inbox_gets_the_thinking_reviewer(tmp_path):
+    """Code review M4: --imap-setup data dirs silently ran the reviewer with thinking off."""
+    from homestead_gate.policy import Policy
+    data = tmp_path / "mail"
+    mailbox.prepare_data_dir(data, USER, "nemotron-3-nano:4b")
+    assert Policy.load(data / "policy.toml").review_think is True

@@ -27,8 +27,6 @@ TF_BASE_URL = "https://api.tokenfactory.nebius.com/v1"
 TF_REVIEWER_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"
 OLLAMA_DEFAULT_MODEL = "nemotron-3-nano:4b"
 
-_THINK = re.compile(r"<think>.*?</think>", re.S)
-_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 
 
 class BudgetExceeded(LLMError):
@@ -61,15 +59,6 @@ class BudgetTransport:
         return status, raw, rh
 
 
-def _clean(text: str) -> str:
-    text = _THINK.sub("", text or "").strip()
-    text = _FENCE.sub("", text).strip()
-    if not text.startswith("{"):
-        m = re.search(r"\{.*\}", text, re.S)     # the first JSON object in a chatty answer
-        text = m.group(0) if m else text
-    return text
-
-
 class TokenFactoryReviewer:
     """OpenAI-compatible reviewer: same SYSTEM prompt, same rendered input, same parser and the
     same fail-closed rule as OllamaReviewer. Temperature 0. Anything but a clear approve/block
@@ -96,7 +85,7 @@ class TokenFactoryReviewer:
         raw = msg.get("content") or ""
         if not raw.strip() and msg.get("reasoning_content"):
             raw = msg["reasoning_content"]
-        return parse(_clean(raw), self.model, round(time.time() - t, 2))
+        return parse(raw, self.model, round(time.time() - t, 2))   # the product's fail-closed parser
 
 
 class ScriptedReviewer:

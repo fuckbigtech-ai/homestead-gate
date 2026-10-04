@@ -19,8 +19,9 @@ yes. The cloud does the thinking. Your machine has the veto. The cloud can't vot
   attacked runs (38%). With the gate (Nano 30B reviewer), **0 of 144**. Travel: 11 of 119 to 0. The cost is
   published next to it: banking tasks finished under attack fell from 78% to 58%. The 4B reviewer on your
   machine, thinking before it answers (the assistant's default), blocked 0.54 legitimate calls per banking run
-  (the 30B: 0.69) and let 1 of 144 through: the sixth identical retry of a call it had blocked five times, which
-  the gate now refuses outright. On travel, held out from all tuning, 0 of 106 action attacks got through. With a human in the loop, 1 of 143 banking attacks got through, not zero.
+  (the 30B: 0.69) and let 1 of 144 through: the agent retried one attacker call until a review went its way. In
+  the product a second key (you) still stands behind the model, and once you deny an action, an identical
+  retry is refused without asking you again (not measured on AgentDojo, whose harness has no human). On travel, held out from all tuning, 0 of 106 action attacks got through. With a human in the loop, 1 of 143 banking attacks got through, not zero.
 - **Receipts you can check:** every request, verdict and decision is written to a hash chain before anything
   runs; edit one record and `homestead-gate watch` shows the line where the chain breaks.
 
@@ -44,8 +45,9 @@ A personal assistant that runs on a schedule, remembers who you deal with, and u
 Two NVIDIA open models: Nemotron 3 Super on Nebius Token Factory plans and calls tools; Nemotron 3
 Nano 4B runs on your machine as the gate's reviewer and reasons before its verdict (`think = true` in
 the policy): about 4x slower per review (about 6s on a cloud L4 GPU; a laptop is slower), and far fewer
-false blocks. Set `think = false` for faster reviews that ask you more often. A refused action stays refused
-for the session: an identical retry is denied without a second review or a second question. Everything the assistant sends goes through the
+false blocks. Set `think = false` for faster reviews that ask you more often. Once you deny an action (or a
+scheduled pass holds it), an identical retry in that session is refused without a second review or a
+second question. Everything the assistant sends goes through the
 [gate](#the-gate), so the cloud does the thinking, your machine has the veto, and the cloud can't vote.
 
 ```bash

@@ -67,22 +67,12 @@ def render(*, user_identity: str | None, user_intent: str, known_contacts: list[
 # think=True is the setting AgentDojo measured for Nemotron 3 Nano 4B (bench/agentdojo/RESULTS.md, "Nano 4B
 # with thinking"): the model reasons before its verdict, at most THINK_PREDICT output tokens, 16K context.
 # It cut legitimate calls blocked per banking run from 4.09 to 0.54 at about 4x the review time. The
-# reasoning comes back in message.thinking and is never read as the verdict. GateBench's published numbers
+# reasoning comes back in message.thinking and is never read as the verdict (see parse()). GateBench's published numbers
 # are for think=False, which stays the default here.
 THINK_PREDICT = 2048
 THINK_CTX = 16384
 _THINK_TAG = re.compile(r"<think>.*?</think>", re.S)
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
-
-
-def _final_json(text: str) -> str:
-    """The verdict object from a thinking reply's final content: think tags and code fences removed,
-    then the first {...}. Anything else stays as is and fails parse(), which fails closed."""
-    text = _FENCE.sub("", _THINK_TAG.sub("", text or "").strip()).strip()
-    if not text.startswith("{"):
-        m = re.search(r"\{.*\}", text, re.S)
-        text = m.group(0) if m else text
-    return text
 
 
 class OllamaReviewer:
@@ -114,15 +104,46 @@ class OllamaReviewer:
             return Verdict("invalid", why, "", self.model, round(time.time() - t, 2))
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
             return Verdict("invalid", f"reviewer unavailable: {e}", "", self.model, round(time.time() - t, 2))
-        return parse(_final_json(raw) if self.think else raw, self.model, round(time.time() - t, 2))
+        return parse(raw, self.model, round(time.time() - t, 2))
+
+
+def _no_duplicate_keys(pairs):
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key")            # {"verdict":"block","verdict":"approve"} is not a verdict
+    return dict(pairs)
+
+
+def _verdict_of(obj) -> str:
+    return str(obj.get("verdict", "")).strip().lower() if isinstance(obj, dict) else ""
 
 
 def parse(raw: str, model: str, secs: float) -> Verdict:
+    """The verdict in a reviewer reply, failing closed. Asymmetric on purpose:
+
+    - "approve" counts only when the reply, after removing closed <think>...</think> blocks and one code
+      fence, IS a single JSON object (no duplicate keys). A reply whose reasoning quotes the poisoned
+      email's own {"verdict": "approve"} therefore cannot approve anything.
+    - a JSON object pulled out of surrounding prose can only BLOCK.
+    - leftover reasoning (an unclosed <think>), no object, or anything else is "invalid", which the gate
+      treats like block.
+    """
+    text = _THINK_TAG.sub("", raw or "")
+    if re.search(r"</?think>", text, re.I):
+        return Verdict("invalid", "reviewer reasoning leaked into its answer", "", model, secs)
+    text = _FENCE.sub("", text.strip()).strip()
     try:
-        j = json.loads(raw)
-        v = str(j.get("verdict", "")).strip().lower()
-    except (ValueError, AttributeError):
-        j, v = {}, ""
+        j = json.loads(text, object_pairs_hook=_no_duplicate_keys)
+    except ValueError:
+        for m in re.finditer(r"\{[^{}]*\}", text):        # embedded objects: a block is honoured, nothing else
+            try:
+                o = json.loads(m.group(0), object_pairs_hook=_no_duplicate_keys)
+            except ValueError:
+                continue
+            if _verdict_of(o) == "block":
+                return Verdict("block", str(o.get("reason", "")), str(o.get("suspicious_span", "")), model, secs)
+        return Verdict("invalid", "reviewer gave no usable verdict", "", model, secs)
+    v = _verdict_of(j)
     if v not in ("approve", "block"):
         return Verdict("invalid", "reviewer gave no usable verdict", "", model, secs)
     return Verdict(v, str(j.get("reason", "")), str(j.get("suspicious_span", "")), model, secs)
