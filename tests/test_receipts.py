@@ -21,6 +21,7 @@ from test_assistant import call, calls
 from test_gate import ME, WALLET, FakeReviewer, scripted, tx
 
 LEDGER_FILE = Path(".hsm") / "ledger.jsonl"
+REAL_STORE_HEAD, REAL_LOAD_HEAD = credstore.store_ledger_head, credstore.load_ledger_head   # before conftest
 
 
 def keys():
@@ -176,7 +177,8 @@ def test_a_failing_anchor_command_warns_and_the_local_checkpoint_stands(tmp_path
 
 
 @pytest.mark.parametrize("edit", [0, 8], ids=["first-record", "middle-record"])
-def test_a_fully_rebuilt_chain_passes_plain_verify_but_fails_against_anchors(tmp_path, edit, capsys):
+def test_a_fully_rebuilt_chain_passes_plain_verify_but_fails_against_anchors(tmp_path, edit, capsys,
+                                                                            ledger_key_store):
     anchors = tmp_path / "anchors"
     policy = Policy(user_email=ME, anchor_dir=str(anchors))
     g = gate(tmp_path, mac=False, policy=policy)                  # no MACs: the anchors alone must catch it
@@ -187,7 +189,11 @@ def test_a_fully_rebuilt_chain_passes_plain_verify_but_fails_against_anchors(tmp
     led = tmp_path / "l"
     rebuild(led, edit=edit)
 
-    assert cli_main(["watch", "--ledger", str(led), "--no-checkpoint"]) == 0          # plain verify: fooled
+    assert cli._watch(led) == 0                                   # plain verify (`hsm watch`): fooled
+    assert cli_main(["watch", "--ledger", str(led), "--no-checkpoint"]) == 1   # this machine's sealed head
+    assert "no longer extends the head this machine last sealed" in capsys.readouterr().err
+    ledger_key_store.heads.clear()                                # say that mark is gone too (another machine)
+    assert cli_main(["watch", "--ledger", str(led), "--no-checkpoint"]) == 0
     capsys.readouterr()
     assert cli_main(["watch", "--ledger", str(led), "--anchors", str(anchors), "--no-checkpoint"]) == 1
     err = capsys.readouterr().err
@@ -379,6 +385,8 @@ def test_the_ledger_key_is_never_written_to_disk_or_argv(tmp_path, monkeypatch, 
     monkeypatch.setattr(credstore, "_backend", lambda: backend)
     monkeypatch.setattr(credstore, "load_or_create_ledger_key", lambda: credstore._ledger_key_from_store(True))
     monkeypatch.setattr(credstore, "load_ledger_key", lambda: credstore._ledger_key_from_store(False))
+    monkeypatch.setattr(credstore, "store_ledger_head", REAL_STORE_HEAD)
+    monkeypatch.setattr(credstore, "load_ledger_head", REAL_LOAD_HEAD)
     monkeypatch.setattr(credstore, "HOME", tmp_path / "gatehome")
     monkeypatch.setattr(cli, "HOME", tmp_path / "gatehome")
     hsm_default = Path("~/.config/homestead-memory/ed25519_key").expanduser()
@@ -392,8 +400,9 @@ def test_the_ledger_key_is_never_written_to_disk_or_argv(tmp_path, monkeypatch, 
     fill(gate(tmp_path, ledger_dir=data / "ledger"), 1)
     assert cli_main(["watch", "--ledger", str(data / "ledger")]) == 0
 
-    [(svc_acct, hexkey)] = fake.items.items()
-    assert svc_acct == (credstore.LEDGER_KEY_SERVICE, credstore.LEDGER_KEY_ACCOUNT)
+    hexkey = fake.items[(credstore.LEDGER_KEY_SERVICE, credstore.LEDGER_KEY_ACCOUNT)]
+    [head_mark] = [v for (svc, _), v in fake.items.items() if svc == credstore.LEDGER_HEAD_SERVICE]
+    assert head_mark == f"{len(ledger.read_all(data / 'ledger'))}:{ledger.head_hash(data / 'ledger')}"
     master = bytes.fromhex(hexkey)
     k = receipts.Keys.from_master(master)
     from cryptography.hazmat.primitives import serialization
@@ -412,3 +421,50 @@ def test_the_ledger_key_is_never_written_to_disk_or_argv(tmp_path, monkeypatch, 
     assert receipts.verify_macs(ledger.read_all(data / "ledger"), k.mac_key).ok
     cp = json.loads((data / "ledger" / receipts.CHECKPOINTS_FILE).read_text().splitlines()[-1])
     assert cp["signer_pubkey"] == k.pubkey
+
+
+# ---- found in review ---------------------------------------------------------------------
+
+def test_a_rebuild_that_strips_every_mac_is_refused_without_anchors(tmp_path, capsys):
+    """Strip every MAC (so the ledger looks like an old one), recompute the chain, delete both local
+    checkpoint files, configure no anchors: the head kept in the credential store still refuses it."""
+    g = gate(tmp_path)
+    fill(g, 2)
+    led = tmp_path / "l"
+    assert receipts.seal(led, policy=g.policy, keys=keys()).status == "written"
+    f = led / LEDGER_FILE
+    recs = [json.loads(x) for x in f.read_text().splitlines()]
+    for r in recs:
+        r["meta"].pop(receipts.MAC_FIELD)
+    recs[1]["summary"] = "forged"
+    f.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    rebuild(led)
+    assert not receipts.has_macs(ledger.read_all(led))
+    r = receipts.seal(led, policy=g.policy, keys=keys(), log=lambda s: None)
+    assert r.status == "refused" and not (led / receipts.CHECKPOINTS_FILE).exists()
+    assert cli_main(["watch", "--ledger", str(led)]) == 1
+    assert "no longer extends the head this machine last sealed" in capsys.readouterr().err
+    assert not (led / receipts.CHECKPOINTS_FILE).exists()
+
+
+def test_a_receipts_failure_never_stops_a_pass_from_saving_its_state(tmp_path, monkeypatch):
+    data = seeded(tmp_path)
+
+    def boom(*a, **kw):
+        raise TimeoutError("timed out waiting for vault lock")
+    monkeypatch.setattr(receipts, "seal", boom)
+    p, _, _ = run_pass(data, FIRST, now=datetime(2026, 10, 2, 7, 0))
+    assert sorted(always_on.load_state(data)["seen"]) == ["msg-001", "msg-002", "msg-003", "msg-004"]
+    assert "no checkpoint was written this pass (TimeoutError" in (data / "brief.md").read_text()
+
+
+def test_a_malformed_anchor_file_is_reported_not_a_traceback(tmp_path):
+    anchors = tmp_path / "anchors"
+    policy = Policy(user_email=ME, anchor_dir=str(anchors))
+    g = gate(tmp_path, policy=policy)
+    fill(g, 1)
+    receipts.seal(tmp_path / "l", policy=policy, keys=keys())
+    (anchors / f"{receipts.ANCHOR_PREFIX}junk.json").write_text(
+        json.dumps({"ledger": str((tmp_path / "l").resolve()), "records": "many", "head_hash": "x"}))
+    rep = receipts.verify_anchors(tmp_path / "l", anchors)
+    assert not rep.ok and any("not a readable checkpoint" in line for line in rep.lines)

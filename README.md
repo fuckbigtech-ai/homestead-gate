@@ -508,24 +508,32 @@ Three things close most of that gap (`src/homestead_gate/receipts.py`):
   can't rewrite later. A rebuilt chain can't match a head that was anchored before the rebuild.
 
 The gate never signs a chain that fails verification, fails a MAC, or does not extend every earlier
-checkpoint it can see, locally or in the anchor folder. Without that rule its own automatic signing
-would launder a rebuild. A refusal goes in the brief and the notification, and `watch` exits 1.
+checkpoint it can see. That includes the local files, the anchor folder, and the last head it sealed for
+this ledger, which it keeps in the credential store (entry `homestead-gate-ledger-head`). Checkpoint files
+can be deleted, but someone with only your files can't reach that keychain entry, so a rebuild that also
+strips every MAC and deletes the checkpoints is still refused. Without that rule, the gate's own automatic
+signing would launder a rebuild. A refusal goes in the brief and the notification, and `watch` exits 1.
 
 **Setting up anchors**, in the policy (`~/.homestead-gate/policy.toml`, or `policy.toml` in an assistant
 data dir):
 
 ```toml
 [receipts]
-# a new file per checkpoint, never overwritten: iCloud Drive, Dropbox, a USB stick, a network share
-anchor_dir = "~/Library/Mobile Documents/com~apple~CloudDocs/homestead-anchors"
-# and/or a command that gets the checkpoint JSON on stdin ($HG_CHECKPOINT is the same JSON as a file,
-# $HG_CHECKPOINT_NAME a unique name); for example, commit it to a private repo you push to
+# A command that gets the checkpoint JSON on stdin ($HG_CHECKPOINT is the same JSON as a file,
+# $HG_CHECKPOINT_NAME a unique name). Here: commit it to a private repo and push to a remote whose
+# history you protect (no force-push, no deletes), so a copy leaves the machine at once.
 anchor_command = "cd ~/hg-anchors && cat > $HG_CHECKPOINT_NAME.json && git add -A && git commit -qm anchor && git push -q"
+# And/or a folder: a new file per checkpoint, never overwritten. The gate reads it back to check.
+anchor_dir = "/Volumes/ANCHORS/homestead"
 ```
 
-The folder only helps if a later attacker can't quietly rewrite it. A cloud folder's version history,
-a USB stick you unplug, an email to yourself, or a remote repository whose history is protected all
-qualify. A folder on the same disk does not.
+An anchor is worth only what a later attacker can't change. Anything that can run code as you can
+delete files from a local folder, a mounted USB stick or a synced cloud folder. It forges nothing: it
+removes the anchors after the point it rewrote and keeps the earlier ones, and verification then only
+says that the newest records are not anchored yet. Good anchors are ones you can't rewrite from this
+machine either: a remote with protected history, an email to yourself, a timestamp authority (below),
+or a USB stick you unplug. A folder on the same disk is not an anchor. A synced cloud folder counts
+only as far as its version history keeps deleted files out of reach; check what yours keeps.
 
 **Trusted time (optional).** Timestamps come from the system clock, which someone with your machine can
 set. For time you don't have to trust, make `anchor_command` an RFC 3161 request to a public timestamp
@@ -568,9 +576,10 @@ the key. Anywhere else, watch says they were not checked. Each anchored file als
 
 | who | edits one record | rebuilds the whole log | deletes the newest records |
 |---|---|---|---|
-| anyone without your account | caught (chain) | caught (MAC, anchors) | caught at the next anchor |
-| someone with your files, but not the key and not the anchors | caught | caught: MACs fail; anchored heads don't match | caught if the records were anchored |
-| someone running code as you, before the records were anchored | caught | **not caught**: the gate's interpreter can read the key, and nothing outside saw those records | **not caught** |
+| someone with your files only (a copied disk, a backup, a shared folder), so no key | caught (chain, MAC) | caught. Rewritten records fail their MAC. With the MACs stripped, the chain still has to extend the head kept in the keychain, and anchored heads don't match | caught if those records were in a checkpoint (the keychain head) or an anchor |
+| someone running code as you | caught | caught back to the last anchor they can't change. **Not caught** for records no such anchor has seen: through the gate's interpreter they can read the key and the keychain head | the same |
+
+Anchors count only if this attacker can't modify them (see above).
 
 **What it still does not cover:**
 
@@ -582,8 +591,11 @@ the key. Anywhere else, watch says they were not checked. Each anchored file als
 - **Record MACs don't bind the record's position.** homestead-memory assigns `seq`, `ts` and `prev_hash`
   inside its own lock, so the MAC covers the content and the per-session counter, not those fields. Egress
   denials from `homestead-gate run` are written without a MAC.
-- **A changed key.** If the keychain entry is lost, a new key is generated. Anchors signed by the old key
-  still verify. `watch` notes the change, and `--signer` turns it into a failure.
+- **A changed key.** If the keychain entry is lost, a new key is generated, and the keychain head goes with
+  it. Anchors signed by the old key still verify. `watch` notes the change, and `--signer` turns it into a
+  failure.
+- **Tested against fakes only.** The tests run the real `security -i` and `secret-tool` code paths against
+  a fake store. They never touch a real keychain.
 
 ### Threat model
 
@@ -657,9 +669,10 @@ assistant to pay bills and answer mail, and doesn't want one poisoned email to e
   can't be locked, and it can register new MCP servers that start outside the sandbox next time.
   Check `claude mcp list` if something looks off.
 - **A rebuilt or shortened ledger, before it was anchored.** Signed checkpoints, record MACs and
-  anchors catch a rebuild of anything that was anchored, and a rebuild by anyone without the key. Someone
-  who can run code as you can still rewrite records that no anchor has seen. Without `[receipts]` anchors,
-  a rebuild is caught only on this machine. See [Receipts as audit evidence](#receipts-as-audit-evidence).
+  anchors catch a rebuild by anyone without the key, and a rebuild of anything that was anchored where the
+  attacker can't write. Someone who can run code as you can still rewrite records that no such anchor has
+  seen. Without `[receipts]` anchors, only this machine's keychain can catch a rebuild, so an auditor
+  holding a copy can't. See [Receipts as audit evidence](#receipts-as-audit-evidence).
 - **Attacks GateBench doesn't cover.** 30 attacks, one step each, written by us. See the bench limits.
 
 MIT licensed.

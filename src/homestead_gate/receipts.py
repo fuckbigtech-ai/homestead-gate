@@ -25,8 +25,11 @@ close most of that gap, all gate-side and all backward compatible (old ledgers v
    own lock (the upstream proposal: compute the MAC inside `ledger.append`).
 
 A checkpoint is never signed over a chain that does not verify, whose MACs fail, or that does not
-extend every earlier checkpoint it can see (local or anchored). Otherwise the gate's own automatic
-signing would launder a rebuild: rebuild the file, wait for the next pass, get a fresh signature.
+extend every earlier checkpoint it can see: local files, anchors, and the last sealed head, which is
+kept in the credential store (entry "homestead-gate-ledger-head") because it is the one local record
+someone with only your files can't rewrite. Otherwise the gate's own automatic signing would launder a
+rebuild: strip the MACs, rebuild the file, delete the checkpoint files, wait for the next pass, get a
+fresh signature.
 """
 from __future__ import annotations
 
@@ -245,6 +248,40 @@ def _extends(recs: list[dict], cp: dict) -> str | None:
     return None
 
 
+def _head_account(root: Path) -> str:
+    return hashlib.sha256(str(Path(root).resolve()).encode()).hexdigest()[:16]
+
+
+def stored_head(root: Path) -> dict | None:
+    """The last head the gate sealed for this ledger, from the credential store (None if none, or no
+    store). Loading never creates anything, so this is safe on an auditor's machine."""
+    try:
+        v = credstore.load_ledger_head(_head_account(root))
+    except credstore.CredentialError:
+        return None
+    if not v:
+        return None
+    n, _, head = v.strip().partition(":")
+    try:
+        return {"records": int(n), "head_hash": head}
+    except ValueError:
+        return {"records": -1, "head_hash": "unreadable"}
+
+
+def _remember_head(root: Path, cp: dict) -> str | None:
+    try:
+        credstore.store_ledger_head(_head_account(root), f"{int(cp['records'])}:{cp['head_hash']}")
+    except credstore.CredentialError as e:
+        return f"WARNING: could not record the sealed head in the credential store: {e}"
+    return None
+
+
+def check_stored_head(root: Path, recs: list[dict]) -> str | None:
+    """None when the chain still extends the head this machine last sealed (or there is none)."""
+    h = stored_head(root)
+    return None if h is None else _extends(recs, h)
+
+
 def _local_checkpoints(root: Path) -> list[dict]:
     out = []
     p = root / CHECKPOINTS_FILE
@@ -277,8 +314,15 @@ def load_anchors(anchor_dir: Path) -> list[tuple[Path, dict]]:
             cp = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if isinstance(cp, dict) and "head_hash" in cp and "records" in cp:
-            out.append((p, cp))
+        if not isinstance(cp, dict):
+            continue
+        try:
+            cp["records"] = int(cp["records"])
+            str(cp["head_hash"])
+        except (KeyError, TypeError, ValueError):
+            cp = {"_malformed": True, "records": 0, "head_hash": "", "ledger": cp.get("ledger"),
+                  "ledger_id": cp.get("ledger_id")}
+        out.append((p, cp))
     return out
 
 
@@ -316,6 +360,9 @@ def seal(ledger_dir: Path, *, policy=None, reviewer_model: str | None = None, re
         res.problems += verify_macs(recs, keys.mac_key).problems()
     anchor_dir = Path(policy.anchor_dir).expanduser() if policy is not None and policy.anchor_dir else None
     earlier = [("local", c) for c in _local_checkpoints(root)]
+    sh = stored_head(root)
+    if sh is not None:
+        earlier.append(("the head last sealed on this machine, kept in the credential store", sh))
     if anchor_dir is not None:
         earlier += [(str(p), c) for p, c in _for_this_ledger(root, recs, load_anchors(anchor_dir))[0]]
     for where, cp in earlier:
@@ -356,6 +403,9 @@ def seal(ledger_dir: Path, *, policy=None, reviewer_model: str | None = None, re
     if cp["signed"]:
         store.atomic_write(root / ledger.CHECKPOINT_REL, line)     # what `hsm watch` reads
     res.status, res.checkpoint = "written", cp
+    remembered = _remember_head(root, cp)
+    if remembered:
+        res.warnings.append(remembered)
     res.anchored, anchor_problems = anchor(cp, policy)
     res.warnings += anchor_problems
     for w in res.warnings:
@@ -444,6 +494,10 @@ def verify_anchors(ledger_dir: Path, anchor_dir: Path, signer: str | None = None
     mine.sort(key=lambda pc: (int(pc[1].get("records", 0)), str(pc[1].get("ts"))))
     pin = signer
     for p, cp in mine:
+        if cp.get("_malformed"):
+            rep.ok = False
+            say(f"!! anchored file {p.name} is not a readable checkpoint")
+            continue
         label = f"{int(cp['records'])} records at {cp.get('ts')} ({p.name})"
         sig_problem = check_signatures(cp)
         if sig_problem:

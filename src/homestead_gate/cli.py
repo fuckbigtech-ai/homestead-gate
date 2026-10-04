@@ -47,9 +47,15 @@ def _err(s: str) -> None:
 
 
 def _seal(ledger_dir: Path, policy, reviewer_model, reason: str, keys) -> "receipts.SealResult":
-    """Checkpoint and anchor the receipts; say what happened in one line."""
+    """Checkpoint and anchor the receipts; say what happened in one line. A failure to checkpoint
+    (a lock timeout, a full disk) is reported, never allowed to take the session's exit down with it."""
     from . import receipts
-    r = receipts.seal(ledger_dir, policy=policy, reviewer_model=reviewer_model, reason=reason, keys=keys, log=_err)
+    try:
+        r = receipts.seal(ledger_dir, policy=policy, reviewer_model=reviewer_model, reason=reason, keys=keys,
+                          log=_err)
+    except (OSError, RuntimeError, ValueError, receipts.credstore.CredentialError) as e:
+        _err(f"receipts: WARNING: no checkpoint written: {type(e).__name__}: {e}")
+        return receipts.SealResult("failed", problems=[str(e)])
     if r.status == "written":
         cp = r.checkpoint
         print(f"  receipts: checkpoint of {cp['records']} records, head {cp['head_hash'][:12]}…, "
@@ -94,6 +100,11 @@ def cmd_watch(a) -> int:
                      (f"; {m.unkeyed_before} older record(s) predate MACs" if m.unkeyed_before else ""))
             else:
                 rc = 1
+    if recs:
+        why = receipts.check_stored_head(led, recs)
+        if why:
+            _err(f"  !! the chain no longer extends the head this machine last sealed: {why}")
+            rc = 1
     policy = _find_policy(led, a.policy)
     dirs = [Path(a.anchors).expanduser()] if a.anchors else []
     if policy is not None and policy.anchor_dir:

@@ -255,8 +255,14 @@ def _seal(data: Path, p: Pass, memory, reviewer, keys, log) -> None:
         policy = asst.load_policy(data, memory)
     except (OSError, ValueError):
         policy = None                        # no anchors without a readable policy; still checkpoint locally
-    r = receipts.seal(data / "ledger", policy=policy, reason="scheduled-pass", keys=keys, log=log,
-                      reviewer_model=getattr(reviewer, "model", None) or (policy.model if policy else None))
+    try:
+        r = receipts.seal(data / "ledger", policy=policy, reason="scheduled-pass", keys=keys, log=log,
+                          reviewer_model=getattr(reviewer, "model", None) or (policy.model if policy else None))
+    except (OSError, RuntimeError, ValueError, receipts.credstore.CredentialError) as e:
+        # Never let the receipts stop the pass from saving which mail it handled: that would handle
+        # the same mail again next time (held twice, prepared twice).
+        p.receipts = f"no checkpoint was written this pass ({type(e).__name__}: {e})"
+        return
     if r.status == "refused":
         p.receipts_refused = True
         p.receipts = "the gate REFUSED to sign a checkpoint: " + "; ".join(r.problems)

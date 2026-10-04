@@ -40,6 +40,10 @@ SERVICE = "homestead-gate-smtp"
 IMAP_SERVICE = "homestead-gate-imap"
 LEDGER_KEY_SERVICE = "homestead-gate-ledger-key"
 LEDGER_KEY_ACCOUNT = "receipts"
+# The last head the gate sealed for each ledger ("records:head", one entry per ledger path). Not a
+# secret, but kept here because it is the one local record someone with only your files can't rewrite:
+# a rebuilt chain that also deletes every checkpoint file still has to extend it.
+LEDGER_HEAD_SERVICE = "homestead-gate-ledger-head"
 LOOKUP_TIMEOUT_S = 20
 HOME = Path.home() / ".homestead-gate"
 CONFIG = HOME / "smtp.toml"
@@ -115,8 +119,8 @@ def _store_generated_secret(service: str, user: str, secret: str, label: str) ->
     (`add-generic-password ... -w KEY` as arguments would be). -T limits silent access to this
     interpreter, as for the passwords. Linux: secret-tool reads the secret from stdin when stdin
     is not a terminal."""
-    if not re.fullmatch(r"[0-9a-f]+", secret):
-        raise CredentialError("refusing to store a non-hex generated secret")
+    if not re.fullmatch(r"[0-9a-f:]+", secret) or not re.fullmatch(r"[0-9a-z-]+", user):
+        raise CredentialError("refusing to store a generated value with unexpected characters")
     if _backend() == "keychain":
         exe = sys.executable.replace("\\", "\\\\").replace('"', '\\"')
         cmd = f'add-generic-password -U -s {service} -a {user} -T "{exe}" -w {secret}\n'
@@ -154,6 +158,16 @@ def load_or_create_ledger_key() -> bytes:
     key = _ledger_key_from_store(create=True)
     assert key is not None
     return key
+
+
+def store_ledger_head(account: str, value: str) -> None:
+    """Record the last sealed head ("records:head") for one ledger; replaces the previous value."""
+    _store_generated_secret(LEDGER_HEAD_SERVICE, account, value, "homestead-gate receipt ledger head")
+
+
+def load_ledger_head(account: str) -> str | None:
+    _backend()
+    return _load_secret(LEDGER_HEAD_SERVICE, account)
 
 
 def load_ledger_key() -> bytes | None:

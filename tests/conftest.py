@@ -37,7 +37,7 @@ class FakeLedgerKeyStore:
     """The receipt ledger's key, held in memory for one test. Production code reaches it through
     credstore.load_or_create_ledger_key / load_ledger_key; the real store is unreachable (above)."""
     def __init__(self):
-        self.key = None
+        self.key, self.heads = None, {}
 
     def load_or_create(self):
         import secrets
@@ -48,6 +48,12 @@ class FakeLedgerKeyStore:
     def load(self):
         return self.key
 
+    def store_head(self, account, value):
+        self.heads[account] = value
+
+    def load_head(self, account):
+        return self.heads.get(account)
+
 
 @pytest.fixture(autouse=True)
 def ledger_key_store(monkeypatch):
@@ -55,4 +61,6 @@ def ledger_key_store(monkeypatch):
     fake = FakeLedgerKeyStore()
     monkeypatch.setattr(credstore, "load_or_create_ledger_key", fake.load_or_create)
     monkeypatch.setattr(credstore, "load_ledger_key", fake.load)
+    monkeypatch.setattr(credstore, "store_ledger_head", fake.store_head)
+    monkeypatch.setattr(credstore, "load_ledger_head", fake.load_head)
     return fake
