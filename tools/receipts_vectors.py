@@ -59,6 +59,7 @@ TYPED_FIELDS = {
     "wallet_tx": ("type", "chain_id", "to", "value_eth", "data"),
 }
 POST_ACTIONS = ("gate.executed", "gate.failed", "gate.denied", "gate.expired")
+HASH_SCHEME = 2                              # spec 4: canonical numbers, addresses and calldata
 
 
 # ====================================================================== generate
@@ -95,22 +96,32 @@ def _requests() -> list[dict]:
 
 
 def _fingerprint_cases(pv: str) -> list[dict]:
-    from homestead_gate.core import payload_hash, typed_action
+    from homestead_gate.core import canonical_action, payload_hash
     cases = [
         ("email, extra keys ignored", {"type": "email", "to": ME, "subject": "s", "body": "b",
                                        "user_intent": "send it", "approved": True}),
         ("email, same typed fields as above", {"type": "email", "to": ME, "subject": "s", "body": "b"}),
+        ("email, recipient case and whitespace folded", {"type": "email", "to": " Me@Example.COM ", "subject": "s",
+                                                         "body": "b", "cc": ["A@B.example"],
+                                                         "bcc": "X@Y.example , z@w.example"}),
         ("wallet_tx, data missing becomes null", {"type": "wallet_tx", "chain_id": 11155111, "to": ZERO,
                                                   "value_eth": 0.01}),
-        ("wallet_tx, integer value differs from float", {"type": "wallet_tx", "chain_id": 11155111, "to": ZERO,
-                                                         "value_eth": 1}),
-        ("wallet_tx, float value", {"type": "wallet_tx", "chain_id": 11155111, "to": ZERO, "value_eth": 1.0}),
+        ("wallet_tx, integer value", {"type": "wallet_tx", "chain_id": 11155111, "to": ZERO, "value_eth": 1}),
+        ("wallet_tx, float 1.0 is the same as integer 1", {"type": "wallet_tx", "chain_id": 11155111, "to": ZERO,
+                                                           "value_eth": 1.0}),
+        ("wallet_tx, numeric strings are numbers", {"type": "wallet_tx", "chain_id": "11155111", "to": ZERO,
+                                                    "value_eth": "1.000"}),
+        ("wallet_tx, address and calldata case folded", {"type": "wallet_tx", "chain_id": 11155111,
+                                                         "to": " 0xABCDEF0000000000000000000000000000000001",
+                                                         "value_eth": 0.01, "data": "DEADBEEF"}),
+        ("wallet_tx, empty calldata is none", {"type": "wallet_tx", "chain_id": 11155111, "to": ZERO,
+                                               "value_eth": 0.01, "data": "0x"}),
         ("email, non-ASCII is escaped as \\uXXXX", {"type": "email", "to": ME, "subject": "café", "body": "ü"}),
-        ("unknown type, every key sorted", {"type": "post", "channel": "#general", "text": "hi"}),
+        ("unknown type, every key sorted", {"type": "post", "channel": "#general", "text": "hi", "n": 2.0}),
     ]
     out = []
     for label, action in cases:
-        body = {"action": typed_action(action), "policy_version": pv}
+        body = {"action": canonical_action(action), "policy_version": pv}
         pre = json.dumps(body, sort_keys=True, separators=(",", ":"))
         h = payload_hash(action, pv)
         assert h == hashlib.sha256(pre.encode()).hexdigest()
@@ -120,12 +131,13 @@ def _fingerprint_cases(pv: str) -> list[dict]:
 
 def _policy_rules(p) -> dict:
     """Policy.version's preimage, rebuilt here (the code exposes only the hash) and checked against it."""
-    from homestead_gate.policy import _NOT_RULES
+    from homestead_gate.policy import _NOT_RULES, canonical_numbers
     rules = {k: v for k, v in sorted(vars(p).items()) if not k.startswith("_") and k not in _NOT_RULES}
     for k in ("dual_control", "review_digest", "review_manifest_digest"):
         if not rules[k]:
             del rules[k]
-    want = hashlib.sha256(json.dumps(rules, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    # published as the policy holds them (floats from a file stay floats); the verifier canonicalizes
+    want = hashlib.sha256(json.dumps(canonical_numbers(rules), sort_keys=True, default=str).encode()).hexdigest()[:16]
     assert want == p.version, "Policy.version changed; update the spec section 4.3 and this function"
     return rules
 
@@ -134,7 +146,7 @@ def _policy_cases(vector_policy, loaded_minimal) -> list[dict]:
     from homestead_gate.policy import Policy
     cases = [
         ("defaults with user email", Policy(user_email=ME)),
-        ("the same rules loaded from a file: floats where the defaults are ints", loaded_minimal),
+        ("the same rules loaded from a file: floats where the defaults are ints, same version", loaded_minimal),
         ("anchor settings are not rules", Policy(user_email=ME, anchor_dir="/x", anchor_command="cat")),
         ("dual control enters once set", Policy(user_email=ME, dual_control=["wallet_tx"])),
         ("the vector ledger's policy (pinned reviewer)", vector_policy),
@@ -187,7 +199,7 @@ def generate(out_dir: Path = DEFAULT_DIR) -> Path:
 
             log("policy.loaded", f"policy {pv} file {psha[:12]}",
                 {"policy_path": POLICY_PATH, "policy_sha256": psha, "policy_version": pv,
-                 "approvers_sha256": None, "dual_control": []}, None, "gate:policy")
+                 "approvers_sha256": None, "dual_control": [], "hash_scheme": HASH_SCHEME}, None, "gate:policy")
 
             review_meta = {"digest": QWEN_9B, "manifest_digest": MANIFEST, "prompt_version": reviewer.PROMPT_VERSION,
                            "prompt_sha256": reviewer.PROMPT_SHA256, "think": False, "pinned_digest": QWEN_9B,
@@ -200,7 +212,7 @@ def generate(out_dir: Path = DEFAULT_DIR) -> Path:
                 r = reqs[rid]
                 a = r["action"]
                 base = {"request_id": rid, "payload_sha256": payload_hash(a, pv), "policy_version": pv,
-                        "policy_sha256": psha}
+                        "policy_sha256": psha, "hash_scheme": HASH_SCHEME}
                 target = f"gate:{a.get('type', '?')}"
                 pre = lambda act, s, **m: log(act, s, {**base, **m}, PRE, target)
                 post = lambda act, s, **m: log(act, s, {**base, **m}, POST, target)
@@ -295,16 +307,57 @@ def record_hash(rec: dict) -> str:
                                      ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
+def canon_numbers(x):
+    """Spec 4: integral floats become integers, recursively; booleans are not numbers."""
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, float):
+        return int(x) if x.is_integer() else x
+    if isinstance(x, dict):
+        return {k: canon_numbers(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [canon_numbers(v) for v in x]
+    return x
+
+
+def _addr(v):
+    if isinstance(v, str):
+        return ",".join(p.strip().lower() for p in v.split(","))
+    return [_addr(x) for x in v] if isinstance(v, list) else v
+
+
+def _num(v):
+    if not isinstance(v, str):
+        return v
+    from decimal import Decimal, InvalidOperation
+    try:
+        d = Decimal(v.strip())
+    except InvalidOperation:
+        return v
+    if not d.is_finite():
+        return v
+    return int(d) if d == d.to_integral_value() else float(d)
+
+
 def fingerprint(action: dict, policy_version: str) -> str:
-    """Spec 4.1 and 4.2."""
+    """Spec 4.1 and 4.2 (hash scheme 2)."""
     fields = TYPED_FIELDS.get(action.get("type"), tuple(sorted(action)))
-    body = {"action": {k: action.get(k) for k in fields}, "policy_version": policy_version}
+    a = {k: action.get(k) for k in fields}
+    if a.get("type") == "email":
+        for k in ("to", "cc", "bcc"):
+            a[k] = _addr(a[k])
+    elif a.get("type") == "wallet_tx":
+        a["to"], a["value_eth"], a["chain_id"] = _addr(a["to"]), _num(a["value_eth"]), _num(a["chain_id"])
+        if isinstance(a["data"], str):
+            h = a["data"].strip().lower().removeprefix("0x")
+            a["data"] = "0x" + h if h else None
+    body = {"action": canon_numbers(a), "policy_version": policy_version}
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def policy_version(rules: dict) -> str:
-    """Spec 4.3."""
-    return hashlib.sha256(json.dumps(rules, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    """Spec 4.3 (hash scheme 2)."""
+    return hashlib.sha256(json.dumps(canon_numbers(rules), sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
 def derive_keys(master: bytes) -> tuple[bytes, bytes]:

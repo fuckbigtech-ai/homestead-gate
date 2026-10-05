@@ -21,9 +21,11 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import math
 import threading
 import uuid
 from dataclasses import replace
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Protocol
 
@@ -32,14 +34,16 @@ from homestead_memory.core import ledger
 from . import adapters, approvers, receipts
 from . import lookup as web_lookup
 from .approval import NO_MODEL_REASON, HumanDecision, needs_full_view
-from .policy import Policy
+from .policy import HASH_SCHEME, Policy, canonical_numbers
 from .reviewer import Verdict, render
 
 NO_MODEL = "none (--no-model)"       # the model name cli._NoModelReviewer reports
 REVIEW_META_KEYS = {"digest": None, "manifest_digest": None, "prompt_version": None, "prompt_sha256": None}
 AGENT = "homestead-gate"
 # What a policy receipt pins. Any of these differing from the last receipt is a policy change.
-POLICY_KEYS = ("policy_path", "policy_sha256", "policy_version", "approvers_sha256", "dual_control")
+# hash_scheme (2026-10-05): how policy_version and payload_sha256 are computed (policy.HASH_SCHEME). The first
+# run after the scheme changed finds it missing from the last receipt and writes policy.changed naming it.
+POLICY_KEYS = ("policy_path", "policy_sha256", "policy_version", "approvers_sha256", "dual_control", "hash_scheme")
 
 
 class Reviewer(Protocol):
@@ -79,8 +83,60 @@ def typed_action(action: dict) -> dict:
     return {k: action.get(k) for k in fields}
 
 
+def _addr(v):
+    """An email address or hex wallet address as a recipient is compared: case and surrounding
+    whitespace never change who receives it (policy.is_self and is_allowlisted already lowercase)."""
+    if isinstance(v, str):
+        return ",".join(p.strip().lower() for p in v.split(","))
+    if isinstance(v, (list, tuple)):
+        return [_addr(x) for x in v]
+    return v
+
+
+def _calldata(v):
+    """Hex calldata, lowercase with 0x. Empty means none, as policy.check and prepare_tx treat it."""
+    if not isinstance(v, str):
+        return v
+    s = v.strip().lower()
+    s = s.removeprefix("0x")
+    return "0x" + s if s else None
+
+
+def _number(v):
+    """A numeric string as the number policy.check reads it ("0.01" == 0.01); anything else unchanged."""
+    if isinstance(v, str):
+        try:
+            d = Decimal(v.strip())
+        except (InvalidOperation, ValueError):
+            return v
+        if not d.is_finite():
+            return v
+        if d == d.to_integral_value():
+            return int(d)
+        f = float(d)
+        return f if math.isfinite(f) else v
+    return v
+
+
+def canonical_action(action: dict) -> dict:
+    """The fingerprint's view of an action (hash scheme 2): the typed fields, with trivial variants
+    folded together so a refused action cannot come back as `Bob@X.com `, `1.0` or `0XDEADBEEF` and skip
+    the sticky refusal. Only the fingerprint uses this; the action that is reviewed and sent is untouched.
+    Folding can only make two requests share a fingerprint, and a shared fingerprint only ever adds a
+    refusal or makes a request wait for an identical one's decision, never reuses an approval."""
+    t = typed_action(action)
+    kind = t.get("type")
+    if kind == "email":
+        for k in ("to", "cc", "bcc"):
+            t[k] = _addr(t[k])
+    elif kind == "wallet_tx":
+        t["to"], t["data"] = _addr(t["to"]), _calldata(t["data"])
+        t["value_eth"], t["chain_id"] = _number(t["value_eth"]), _number(t["chain_id"])
+    return canonical_numbers(t)
+
+
 def payload_hash(action: dict, policy_version: str = "") -> str:
-    body = {"action": typed_action(action), "policy_version": policy_version}
+    body = {"action": canonical_action(action), "policy_version": policy_version}
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -124,7 +180,7 @@ class Gate:
         p = self.policy
         return {"policy_path": str(p.path) if p.path else None, "policy_sha256": p.file_sha256,
                 "policy_version": p.version, "approvers_sha256": approvers.file_sha256(p.approvers_dir),
-                "dual_control": list(p.dual_control)}
+                "dual_control": list(p.dual_control), "hash_scheme": HASH_SCHEME}
 
     def _last_policy_receipt(self) -> dict | None:
         try:
@@ -254,7 +310,7 @@ class Gate:
         self._check_policy()
         pv = self.policy.version
         base = {"request_id": rid, "payload_sha256": payload_hash(action, pv), "policy_version": pv,
-                "policy_sha256": self.policy.file_sha256}
+                "policy_sha256": self.policy.file_sha256, "hash_scheme": HASH_SCHEME}
         pre = lambda a, s, **m: self._log(a, s, {**base, **m}, ledger.PHASE_PRE, target)
         post = lambda a, s, **m: self._log(a, s, {**base, **m}, ledger.PHASE_POST, target)
 

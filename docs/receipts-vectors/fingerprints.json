@@ -9,9 +9,9 @@
    "user_intent": "send it"
   },
   "label": "email, extra keys ignored",
-  "payload_sha256": "ad9cce9234168bc6eb527d55c9b1c739aef09f5c5b7271995e62748c7ec5cf8f",
-  "policy_version": "96f2ed88c81208ab",
-  "preimage": "{\"action\":{\"attachments\":null,\"bcc\":null,\"body\":\"b\",\"cc\":null,\"subject\":\"s\",\"to\":\"me@example.com\",\"type\":\"email\"},\"policy_version\":\"96f2ed88c81208ab\"}"
+  "payload_sha256": "335db9ba277f6338ee88c35fd362177c318d933e3cd68613872c27b32ac4a9dd",
+  "policy_version": "584ce2ae6336b45a",
+  "preimage": "{\"action\":{\"attachments\":null,\"bcc\":null,\"body\":\"b\",\"cc\":null,\"subject\":\"s\",\"to\":\"me@example.com\",\"type\":\"email\"},\"policy_version\":\"584ce2ae6336b45a\"}"
  },
  {
   "action": {
@@ -21,9 +21,25 @@
    "type": "email"
   },
   "label": "email, same typed fields as above",
-  "payload_sha256": "ad9cce9234168bc6eb527d55c9b1c739aef09f5c5b7271995e62748c7ec5cf8f",
-  "policy_version": "96f2ed88c81208ab",
-  "preimage": "{\"action\":{\"attachments\":null,\"bcc\":null,\"body\":\"b\",\"cc\":null,\"subject\":\"s\",\"to\":\"me@example.com\",\"type\":\"email\"},\"policy_version\":\"96f2ed88c81208ab\"}"
+  "payload_sha256": "335db9ba277f6338ee88c35fd362177c318d933e3cd68613872c27b32ac4a9dd",
+  "policy_version": "584ce2ae6336b45a",
+  "preimage": "{\"action\":{\"attachments\":null,\"bcc\":null,\"body\":\"b\",\"cc\":null,\"subject\":\"s\",\"to\":\"me@example.com\",\"type\":\"email\"},\"policy_version\":\"584ce2ae6336b45a\"}"
+ },
+ {
+  "action": {
+   "bcc": "X@Y.example , z@w.example",
+   "body": "b",
+   "cc": [
+    "A@B.example"
+   ],
+   "subject": "s",
+   "to": " Me@Example.COM ",
+   "type": "email"
+  },
+  "label": "email, recipient case and whitespace folded",
+  "payload_sha256": "332bf06ee0d3bcf7b4ff7c36b5f19cb06f3914b380d14f7b126ebd6975658af7",
+  "policy_version": "584ce2ae6336b45a",
+  "preimage": "{\"action\":{\"attachments\":null,\"bcc\":\"x@y.example,z@w.example\",\"body\":\"b\",\"cc\":[\"a@b.example\"],\"subject\":\"s\",\"to\":\"me@example.com\",\"type\":\"email\"},\"policy_version\":\"584ce2ae6336b45a\"}"
  },
  {
   "action": {
@@ -33,9 +49,9 @@
    "value_eth": 0.01
   },
   "label": "wallet_tx, data missing becomes null",
-  "payload_sha256": "638bbab9e7808eac19bc6c162bc6e5a44f5e0bc2e80f976717c3c7b68992fecb",
-  "policy_version": "96f2ed88c81208ab",
-  "preimage": "{\"action\":{\"chain_id\":11155111,\"data\":null,\"to\":\"0x0000000000000000000000000000000000000000\",\"type\":\"wallet_tx\",\"value_eth\":0.01},\"policy_version\":\"96f2ed88c81208ab\"}"
+  "payload_sha256": "f0b9dc0d428d3a6dfb4a38e42c3d447572d21552f93a02c415a26770f6fed7d0",
+  "policy_version": "584ce2ae6336b45a",
+  "preimage": "{\"action\":{\"chain_id\":11155111,\"data\":null,\"to\":\"0x0000000000000000000000000000000000000000\",\"type\":\"wallet_tx\",\"value_eth\":0.01},\"policy_version\":\"584ce2ae6336b45a\"}"
  },
  {
   "action": {
@@ -44,10 +60,10 @@
    "type": "wallet_tx",
    "value_eth": 1
   },
-  "label": "wallet_tx, integer value differs from float",
-  "payload_sha256": "40fed725f98f3f1ff2002ffb666f9be16ad5466a1afda1b02c918201502c8efb",
-  "policy_version": "96f2ed88c81208ab",
-  "preimage": "{\"action\":{\"chain_id\":11155111,\"data\":null,\"to\":\"0x0000000000000000000000000000000000000000\",\"type\":\"wallet_tx\",\"value_eth\":1},\"policy_version\":\"96f2ed88c81208ab\"}"
+  "label": "wallet_tx, integer value",
+  "payload_sha256": "53d514fd4831c9435e4fd3c2d22fd6763bbfbcd6ce0f37bed441fd148bb5dd25",
+  "policy_version": "584ce2ae6336b45a",
+  "preimage": "{\"action\":{\"chain_id\":11155111,\"data\":null,\"to\":\"0x0000000000000000000000000000000000000000\",\"type\":\"wallet_tx\",\"value_eth\":1},\"policy_version\":\"584ce2ae6336b45a\"}"
  },
  {
   "action": {
@@ -56,10 +72,48 @@
    "type": "wallet_tx",
    "value_eth": 1.0
   },
-  "label": "wallet_tx, float value",
-  "payload_sha256": "0d04c1862ccedd5d687438c4018726d444a3ef4e6eb1e7b99bd2583e2057280c",
-  "policy_version": "96f2ed88c81208ab",
-  "preimage": "{\"action\":{\"chain_id\":11155111,\"data\":null,\"to\":\"0x0000000000000000000000000000000000000000\",\"type\":\"wallet_tx\",\"value_eth\":1.0},\"policy_version\":\"96f2ed88c81208ab\"}"
+  "label": "wallet_tx, float 1.0 is the same as integer 1",
+  "payload_sha256": "53d514fd4831c9435e4fd3c2d22fd6763bbfbcd6ce0f37bed441fd148bb5dd25",
+  "policy_version": "584ce2ae6336b45a",
+  "preimage": "{\"action\":{\"chain_id\":11155111,\"data\":null,\"to\":\"0x0000000000000000000000000000000000000000\",\"type\":\"wallet_tx\",\"value_eth\":1},\"policy_version\":\"584ce2ae6336b45a\"}"
+ },
+ {
+  "action": {
+   "chain_id": "11155111",
+   "to": "0x0000000000000000000000000000000000000000",
+   "type": "wallet_tx",
+   "value_eth": "1.000"
+  },
+  "label": "wallet_tx, numeric strings are numbers",
+  "payload_sha256": "53d514fd4831c9435e4fd3c2d22fd6763bbfbcd6ce0f37bed441fd148bb5dd25",
+  "policy_version": "584ce2ae6336b45a",
+  "preimage": "{\"action\":{\"chain_id\":11155111,\"data\":null,\"to\":\"0x0000000000000000000000000000000000000000\",\"type\":\"wallet_tx\",\"value_eth\":1},\"policy_version\":\"584ce2ae6336b45a\"}"
+ },
+ {
+  "action": {
+   "chain_id": 11155111,
+   "data": "DEADBEEF",
+   "to": " 0xABCDEF0000000000000000000000000000000001",
+   "type": "wallet_tx",
+   "value_eth": 0.01
+  },
+  "label": "wallet_tx, address and calldata case folded",
+  "payload_sha256": "17a94b8ee2158774133568ccfa856c16b26cf2e2c586ab300a1165413f37ea9b",
+  "policy_version": "584ce2ae6336b45a",
+  "preimage": "{\"action\":{\"chain_id\":11155111,\"data\":\"0xdeadbeef\",\"to\":\"0xabcdef0000000000000000000000000000000001\",\"type\":\"wallet_tx\",\"value_eth\":0.01},\"policy_version\":\"584ce2ae6336b45a\"}"
+ },
+ {
+  "action": {
+   "chain_id": 11155111,
+   "data": "0x",
+   "to": "0x0000000000000000000000000000000000000000",
+   "type": "wallet_tx",
+   "value_eth": 0.01
+  },
+  "label": "wallet_tx, empty calldata is none",
+  "payload_sha256": "f0b9dc0d428d3a6dfb4a38e42c3d447572d21552f93a02c415a26770f6fed7d0",
+  "policy_version": "584ce2ae6336b45a",
+  "preimage": "{\"action\":{\"chain_id\":11155111,\"data\":null,\"to\":\"0x0000000000000000000000000000000000000000\",\"type\":\"wallet_tx\",\"value_eth\":0.01},\"policy_version\":\"584ce2ae6336b45a\"}"
  },
  {
   "action": {
@@ -69,19 +123,20 @@
    "type": "email"
   },
   "label": "email, non-ASCII is escaped as \\uXXXX",
-  "payload_sha256": "0d87d9a8d0ca48e91f854bc0d04431248c45e11614c7a7a0d671c3f840561609",
-  "policy_version": "96f2ed88c81208ab",
-  "preimage": "{\"action\":{\"attachments\":null,\"bcc\":null,\"body\":\"\\u00fc\",\"cc\":null,\"subject\":\"caf\\u00e9\",\"to\":\"me@example.com\",\"type\":\"email\"},\"policy_version\":\"96f2ed88c81208ab\"}"
+  "payload_sha256": "bccc67788ed883cb049b8d47e2927a553204daa527ad8689fa4831d6e45fb075",
+  "policy_version": "584ce2ae6336b45a",
+  "preimage": "{\"action\":{\"attachments\":null,\"bcc\":null,\"body\":\"\\u00fc\",\"cc\":null,\"subject\":\"caf\\u00e9\",\"to\":\"me@example.com\",\"type\":\"email\"},\"policy_version\":\"584ce2ae6336b45a\"}"
  },
  {
   "action": {
    "channel": "#general",
+   "n": 2.0,
    "text": "hi",
    "type": "post"
   },
   "label": "unknown type, every key sorted",
-  "payload_sha256": "d1eb3d082eaafae1d8a2014fdb78ba0ab30089ee2bea47c518f308f5b55d769b",
-  "policy_version": "96f2ed88c81208ab",
-  "preimage": "{\"action\":{\"channel\":\"#general\",\"text\":\"hi\",\"type\":\"post\"},\"policy_version\":\"96f2ed88c81208ab\"}"
+  "payload_sha256": "ca5ced5e2a192270fe9ebee071f99b8a4f61892d53914c92ab7579e4d36e7509",
+  "policy_version": "584ce2ae6336b45a",
+  "preimage": "{\"action\":{\"channel\":\"#general\",\"n\":2,\"text\":\"hi\",\"type\":\"post\"},\"policy_version\":\"584ce2ae6336b45a\"}"
  }
 ]

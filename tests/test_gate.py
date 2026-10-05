@@ -281,6 +281,69 @@ def test_policy_version_recorded_and_changes_with_rules(tmp_path):
     assert Policy(user_email=ME, max_value_eth=1).version != Policy(user_email=ME).version
 
 
+def test_trivial_variants_share_a_fingerprint():
+    # Hash scheme 2 (2026-10-05). Before, each of these gave a different fingerprint.
+    from homestead_gate.core import payload_hash
+    a = tx(value=1)
+    for v in (tx(value=1.0), tx(value="1"), tx(value=" 1.000 "), {**tx(value=1), "chain_id": "11155111"},
+              tx(to=ZERO.upper(), value=1), tx(to=" " + ZERO + "\n", value=1),
+              tx(value=1, data="0x"), tx(value=1, data="")):
+        assert payload_hash(v, "p") == payload_hash(a, "p"), v
+    d = tx(data="0xDEADBEEF")
+    assert payload_hash(d, "p") == payload_hash(tx(data="deadbeef"), "p") == payload_hash(tx(data=" 0xdeadbeef"), "p")
+    e = {"type": "email", "to": "bob@x.example", "subject": "s", "body": "b"}
+    assert payload_hash({**e, "to": " Bob@X.Example "}, "p") == payload_hash(e, "p")
+    assert payload_hash({**e, "cc": "A@b.example, C@d.example"}, "p") == payload_hash({**e, "cc": "a@b.example,c@d.example"}, "p")
+    # what the action does still matters
+    assert payload_hash(tx(value=1.5), "p") != payload_hash(a, "p")
+    assert payload_hash(tx(value="1.5"), "p") == payload_hash(tx(value=1.5), "p")
+    assert payload_hash({**e, "body": "B"}, "p") != payload_hash(e, "p")      # bodies are never folded
+    assert payload_hash(tx(value=True), "p") != payload_hash(a, "p")          # a bool is not the number 1
+
+
+@pytest.mark.parametrize("retry", [tx(value=1.0), tx(value="1"), tx(to=" " + ZERO.upper() + " ", value=1),
+                                   {**tx(value=1), "chain_id": 11155111.0}])
+def test_a_refused_action_cannot_dodge_the_sticky_refusal_with_a_trivial_variant(tmp_path, retry):
+    g, rv = make_gate(tmp_path, verdict="block", answers=("n",), max_value_eth=2)
+    assert g.submit({"action": tx(value=1)})["by"] == "human:terminal"        # the human says no
+    asked = len(rv.prompts)
+    r = g.submit({"action": retry})                                           # no answers left to give
+    assert r["status"] == "denied" and r["by"] == "policy" and "already refused" in r["reason"]
+    assert len(rv.prompts) == asked                                           # not even reviewed again
+
+
+def test_a_policy_file_and_the_same_rules_in_code_have_one_version(tmp_path):
+    p = tmp_path / "policy.toml"
+    p.write_text('[user]\nemail = "me@example.com"\n[approval]\ntimeout_s = 300\noverride_delay_s = 60.0\n')
+    assert Policy.load(p).version == Policy(user_email=ME).version == "4088984b870d45c8"
+    assert Policy(user_email=ME, review_timeout_s=120.0).version == "4088984b870d45c8"
+    assert Policy(user_email=ME, max_value_eth=0.5).version != "4088984b870d45c8"
+
+
+def test_the_first_run_under_hash_scheme_2_records_the_change(tmp_path):
+    p = tmp_path / "policy.toml"
+    p.write_text('[user]\nemail = "me@example.com"\n')
+    pol = Policy.load(p)
+    led = tmp_path / "l"
+    old = {"policy_path": str(pol.path), "policy_sha256": pol.file_sha256, "policy_version": "cbd82fd891fb95e5",
+           "approvers_sha256": None, "dual_control": []}                     # what a scheme-1 gate wrote
+    ledger.append("policy.loaded", target="gate:policy", summary="old", meta=old, vault=led,
+                  agent="homestead-gate", session="old")
+    g = Gate(policy=pol, reviewer=FakeReviewer(), approver=scripted(), ledger_dir=led, task="t",
+             session="new", outbox=tmp_path / "out")
+    g.record_policy()
+    rec = ledger.read_all(led)[-1]
+    assert rec["action"] == "policy.changed"
+    assert rec["meta"]["changed"] == ["policy_version", "hash_scheme"]
+    assert rec["meta"]["previous"]["policy_version"] == "cbd82fd891fb95e5"
+    assert rec["meta"]["policy_version"] == "4088984b870d45c8" and rec["meta"]["hash_scheme"] == 2
+    assert rec["meta"]["policy_sha256"] == pol.file_sha256                    # same file, new version: explained
+    g2 = Gate(policy=pol, reviewer=FakeReviewer(), approver=scripted(), ledger_dir=led, task="t",
+              session="next", outbox=tmp_path / "out")
+    g2.record_policy()
+    assert ledger.read_all(led)[-1]["action"] == "policy.loaded"              # once only
+
+
 # ---- Vitalik's April 2026 wallet rules ----------------------------------------------------
 
 POOL = "0x" + "2" * 40

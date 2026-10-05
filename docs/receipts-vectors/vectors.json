@@ -4,7 +4,7 @@
  "mac_key_hex": "e3f9d1427e44d45b995a540824f9d865993c386bb0c04338a22f05b7fda93b37",
  "policy_sha256": "095ed9837156e37ea47c67a2f3f9c5932d8aa4f314871b9dec552348b690eaca",
  "policy_toml": "# Agent Action Receipts v0.1 test vector policy\n[user]\nemail = \"me@example.com\"\nwallet = \"0x1111111111111111111111111111111111111111\"\n\n[email]\nallow = [\"friend@example.org\"]\n\n[review]\nmodel = \"qwen3.5:9b\"\ndigest = \"sha256:dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c\"\nmanifest_digest = \"sha256:abababababababababababababababababababababababababababababababab\"\n",
- "policy_version": "96f2ed88c81208ab",
+ "policy_version": "584ce2ae6336b45a",
  "requests": [
   {
    "action": {

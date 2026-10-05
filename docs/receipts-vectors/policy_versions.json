@@ -21,7 +21,7 @@
   "version": "4088984b870d45c8"
  },
  {
-  "label": "the same rules loaded from a file: floats where the defaults are ints",
+  "label": "the same rules loaded from a file: floats where the defaults are ints, same version",
   "rules": {
    "approval_timeout_s": 300.0,
    "chain_id": 11155111,
@@ -39,7 +39,7 @@
    "user_email": "me@example.com",
    "user_wallet": ""
   },
-  "version": "cbd82fd891fb95e5"
+  "version": "4088984b870d45c8"
  },
  {
   "label": "anchor settings are not rules",
@@ -109,6 +109,6 @@
    "user_email": "me@example.com",
    "user_wallet": "0x1111111111111111111111111111111111111111"
   },
-  "version": "96f2ed88c81208ab"
+  "version": "584ce2ae6336b45a"
  }
 ]

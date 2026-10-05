@@ -29,6 +29,28 @@ DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _NOT_RULES = frozenset({"anchor_dir", "anchor_command", "lookup_tavily"})
 
 
+# How rules and actions are hashed. 1: Python's repr of whatever types arrived (TOML gave floats where the
+# code's defaults are ints, so the same rules had two versions; 1 and 1.0 gave two fingerprints).
+# 2 (2026-10-05): numbers canonical (integral floats become ints) in Policy.version and in the payload
+# fingerprint, plus addresses and calldata canonical in the fingerprint (core.canonical_action).
+# Recorded as `hash_scheme` in policy receipts and on gate records, so an auditor knows which to recompute.
+HASH_SCHEME = 2
+
+
+def canonical_numbers(x):
+    """1.0 -> 1, recursively through dicts and lists. bools, ints, non-integral floats (0.05) and
+    everything else are unchanged, so most rules and actions hash exactly as before."""
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, float):
+        return int(x) if x.is_integer() else x
+    if isinstance(x, dict):
+        return {k: canonical_numbers(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [canonical_numbers(v) for v in x]
+    return x
+
+
 SPEND_WORDS = re.compile(r"\b(pay|pays|paid|payment|payments|invoices?|bills?|tip|tips|reimburse\w*|refund\w*|transfer\w*|wire|settle)\b|\bsend\b[^.\n]{0,40}(\$\s?\d|\d[\d.,]*\s?(eth|usdc|usdt|usd|dollars?|cad)\b)", re.I)
 
 
@@ -132,6 +154,9 @@ class Policy:
         for k in ("dual_control", "review_digest", "review_manifest_digest"):
             if not rules[k]:
                 del rules[k]
+        # Hash scheme 2: integral floats as ints, so a policy loaded from TOML (timeout_s = 120 -> 120.0)
+        # has the same version as the same rules built in code (120). Code-built versions did not move.
+        rules = canonical_numbers(rules)
         return hashlib.sha256(json.dumps(rules, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
     @property
