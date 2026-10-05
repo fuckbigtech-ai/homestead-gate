@@ -1,0 +1,114 @@
+[
+ {
+  "label": "defaults with user email",
+  "rules": {
+   "approval_timeout_s": 300,
+   "chain_id": 11155111,
+   "daily_auto_value_eth": 0.035,
+   "email_allow": [],
+   "evm_allow": [],
+   "max_actions_per_hour": 20,
+   "max_calldata_bytes": 256,
+   "max_value_eth": 0.05,
+   "model": "qwen3.5:9b",
+   "ollama_url": "http://127.0.0.1:11434",
+   "override_delay_s": 60,
+   "review_think": false,
+   "review_timeout_s": 120,
+   "user_email": "me@example.com",
+   "user_wallet": ""
+  },
+  "version": "4088984b870d45c8"
+ },
+ {
+  "label": "the same rules loaded from a file: floats where the defaults are ints",
+  "rules": {
+   "approval_timeout_s": 300.0,
+   "chain_id": 11155111,
+   "daily_auto_value_eth": 0.035,
+   "email_allow": [],
+   "evm_allow": [],
+   "max_actions_per_hour": 20,
+   "max_calldata_bytes": 256,
+   "max_value_eth": 0.05,
+   "model": "qwen3.5:9b",
+   "ollama_url": "http://127.0.0.1:11434",
+   "override_delay_s": 60.0,
+   "review_think": false,
+   "review_timeout_s": 120.0,
+   "user_email": "me@example.com",
+   "user_wallet": ""
+  },
+  "version": "cbd82fd891fb95e5"
+ },
+ {
+  "label": "anchor settings are not rules",
+  "rules": {
+   "approval_timeout_s": 300,
+   "chain_id": 11155111,
+   "daily_auto_value_eth": 0.035,
+   "email_allow": [],
+   "evm_allow": [],
+   "max_actions_per_hour": 20,
+   "max_calldata_bytes": 256,
+   "max_value_eth": 0.05,
+   "model": "qwen3.5:9b",
+   "ollama_url": "http://127.0.0.1:11434",
+   "override_delay_s": 60,
+   "review_think": false,
+   "review_timeout_s": 120,
+   "user_email": "me@example.com",
+   "user_wallet": ""
+  },
+  "version": "4088984b870d45c8"
+ },
+ {
+  "label": "dual control enters once set",
+  "rules": {
+   "approval_timeout_s": 300,
+   "chain_id": 11155111,
+   "daily_auto_value_eth": 0.035,
+   "dual_control": [
+    "wallet_tx"
+   ],
+   "email_allow": [],
+   "evm_allow": [],
+   "max_actions_per_hour": 20,
+   "max_calldata_bytes": 256,
+   "max_value_eth": 0.05,
+   "model": "qwen3.5:9b",
+   "ollama_url": "http://127.0.0.1:11434",
+   "override_delay_s": 60,
+   "review_think": false,
+   "review_timeout_s": 120,
+   "user_email": "me@example.com",
+   "user_wallet": ""
+  },
+  "version": "fd53da3627a60dbb"
+ },
+ {
+  "label": "the vector ledger's policy (pinned reviewer)",
+  "rules": {
+   "approval_timeout_s": 300.0,
+   "chain_id": 11155111,
+   "daily_auto_value_eth": 0.035,
+   "email_allow": [
+    "friend@example.org"
+   ],
+   "evm_allow": [],
+   "max_actions_per_hour": 20,
+   "max_calldata_bytes": 256,
+   "max_value_eth": 0.05,
+   "model": "qwen3.5:9b",
+   "ollama_url": "http://127.0.0.1:11434",
+   "override_delay_s": 60.0,
+   "review_digest": "sha256:dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c",
+   "review_manifest_digest": "sha256:abababababababababababababababababababababababababababababababab",
+   "review_think": false,
+   "review_timeout_s": 120.0,
+   "user_email": "me@example.com",
+   "user_wallet": "0x1111111111111111111111111111111111111111"
+  },
+  "version": "96f2ed88c81208ab"
+ }
+]
