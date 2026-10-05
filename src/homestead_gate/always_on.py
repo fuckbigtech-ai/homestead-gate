@@ -110,7 +110,7 @@ def save_pending(data: Path, items: list[dict]) -> None:
 
 def resolve_pending(data: Path, *, policy_factory: Callable[[], object], reviewer, approver,
                     log: Callable[[str], None] = print, lookup=None,
-                    mac_key: bytes | None = None) -> list[dict]:
+                    mac_key: bytes | None = None, keys=None) -> list[dict]:
     """Put each held item through the full gate again (policy, reviewer, the terminal approver).
     Items the human answered leave the queue; an unanswered one stays. Returns
     [{"item", "result"}]."""
@@ -130,7 +130,7 @@ def resolve_pending(data: Path, *, policy_factory: Callable[[], object], reviewe
         asst.replay_auto_spend(policy, data / "ledger")
         gate = Gate(policy=policy, reviewer=reviewer, approver=approver, ledger_dir=data / "ledger",
                     task=str(item.get("task", "")), session=secrets.token_hex(4), outbox=data / "outbox",
-                    lookup=lookup, lookup_cache=lookup_cache, mac_key=mac_key)
+                    lookup=lookup, lookup_cache=lookup_cache, mac_key=mac_key, keys=keys)
         log(f"held {item.get('created', '?')} by skill {item.get('skill', '?')}: "
             f"{_what(item.get('action') or {})}")
         res = gate.submit({"action": item.get("action") or {}, "read": item.get("reads") or []})
@@ -242,7 +242,7 @@ def run_pass(data: Path, skill: Skill, *, llm, reviewer, now: datetime | None = 
         if p.new_mail:
             out = _run(data, skill, p, state, llm=llm, reviewer=reviewer, memory=memory, names=names,
                        guard_prompt=guard_prompt, max_steps=max_steps, make_bot=make_bot,
-                       wrap_submit=wrap_submit, log=log, mac_key=keys.mac_key if keys else None)
+                       wrap_submit=wrap_submit, log=log, keys=keys)
             if out is not None:
                 state["seen"] = sorted(set(state.get("seen") or []) | {m["id"] for m in p.new_mail})
         if seal:
@@ -282,11 +282,12 @@ def _seal(data: Path, p: Pass, memory, reviewer, keys, log) -> None:
 
 
 def _run(data, skill, p: Pass, state, *, llm, reviewer, memory, names, guard_prompt, max_steps,
-         make_bot, wrap_submit, log, mac_key=None):
+         make_bot, wrap_submit, log, mac_key=None, keys=None):
     policy = asst.load_policy(data, memory)
     asst.replay_auto_spend(policy, data / "ledger")
     gate = Gate(policy=policy, reviewer=reviewer, approver=HoldApprover(), ledger_dir=data / "ledger",
-                task=skill.instruction, session=secrets.token_hex(4), outbox=data / "outbox", mac_key=mac_key)
+                task=skill.instruction, session=secrets.token_hex(4), outbox=data / "outbox", mac_key=mac_key,
+                keys=keys, seal_log=log)
 
     def submit(request: dict) -> dict:
         res = gate.submit(request)

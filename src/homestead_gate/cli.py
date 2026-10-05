@@ -356,7 +356,7 @@ def _serve(policy: Policy, a, task: str, smtp=None) -> int:
     ledger_dir = Path(a.ledger).expanduser()
     session = secrets.token_hex(4)
     keys = receipts.ledger_keys(warn=_err)
-    gate = Gate(policy=policy, mac_key=keys.mac_key if keys else None,
+    gate = Gate(policy=policy, keys=keys,
                 reviewer=_make_reviewer(policy, getattr(a, "allow_unpinned_reviewer", False)),
                 approver=TerminalApprover(override_delay_s=policy.override_delay_s,
                                           timeout_s=policy.approval_timeout_s),
@@ -842,7 +842,7 @@ def cmd_assistant(a) -> int:
             from . import receipts
             keys = receipts.ledger_keys(warn=_err)
             results = always_on.resolve_pending(data, policy_factory=fresh, reviewer=reviewer, approver=approver,
-                                                lookup=_web_lookup(policy), mac_key=keys.mac_key if keys else None)
+                                                lookup=_web_lookup(policy), keys=keys)
             _seal(data / "ledger", policy, getattr(reviewer, "model", None) or policy.model, "pending", keys)
             for r in results:
                 print(f"  -> {r['result'].get('status')}" + (f" by {r['result']['by']}" if r["result"].get("by") else ""))
@@ -935,7 +935,7 @@ def cmd_assistant(a) -> int:
     spent = asst.replay_auto_spend(policy, ledger_dir)
     from . import receipts
     keys = receipts.ledger_keys(warn=_err)
-    gate = Gate(policy=policy, reviewer=reviewer, mac_key=keys.mac_key if keys else None,
+    gate = Gate(policy=policy, reviewer=reviewer, keys=keys,
                 approver=TerminalApprover(override_delay_s=policy.override_delay_s,
                                           timeout_s=policy.approval_timeout_s),
                 ledger_dir=ledger_dir, task=task, session=secrets.token_hex(4),

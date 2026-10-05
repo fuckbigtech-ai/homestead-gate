@@ -54,6 +54,7 @@ MAC_VERSION = 2                              # 1: records written before 2026-10
 CHECKPOINT_VERSION = 1
 ANCHOR_PREFIX = "hg-checkpoint-"
 ANCHOR_TIMEOUT_S = 60
+STORED_HEAD = "the head last sealed on this machine, kept in the credential store"
 _SIGN_INFO = b"homestead-gate checkpoint ed25519 v1"
 _MAC_INFO = b"homestead-gate record mac v1"
 
@@ -417,9 +418,12 @@ class SealResult:
 
 
 def seal(ledger_dir: Path, *, policy=None, reviewer_model: str | None = None, reason: str = "",
-         keys: Keys | None = None, log: Callable[[str], None] = print) -> SealResult:
+         keys: Keys | None = None, log: Callable[[str], None] = print,
+         run_anchor_command: bool = True) -> SealResult:
     """Write a checkpoint of the ledger as it is now, and anchor it. Refuses (and says so) rather
-    than sign a chain that does not verify or does not extend every earlier checkpoint."""
+    than sign a chain that does not verify or does not extend every earlier checkpoint.
+    run_anchor_command=False (the per-action seal) skips `anchor_command`, which may take up to a minute
+    or send mail; `anchor_dir`, the local checkpoint and the stored head are still written."""
     root = Path(ledger_dir).expanduser()
     if not (root / ledger.LEDGER_REL).exists():
         return SealResult("empty")
@@ -436,7 +440,7 @@ def seal(ledger_dir: Path, *, policy=None, reviewer_model: str | None = None, re
     earlier = [("local", c) for c in _local_checkpoints(root)]
     sh = stored_head(root)
     if sh is not None:
-        earlier.append(("the head last sealed on this machine, kept in the credential store", sh))
+        earlier.append((STORED_HEAD, sh))
     if anchor_dir is not None:
         earlier += [(str(p), c) for p, c in _for_this_ledger(root, recs, load_anchors(anchor_dir))[0]]
     for where, cp in earlier:
@@ -450,9 +454,12 @@ def seal(ledger_dir: Path, *, policy=None, reviewer_model: str | None = None, re
         return res
 
     head, count = recs[-1]["hash"], len(recs)
-    newest = max(earlier, key=lambda wc: int(wc[1].get("records", 0)), default=None)
-    if newest and newest[1].get("head_hash") == head and int(newest[1].get("records", -1)) == count:
-        return SealResult("unchanged", checkpoint=newest[1])
+    same = [(w, c) for w, c in earlier if c.get("head_hash") == head and int(c.get("records", -1)) == count]
+    # A per-action checkpoint ("executed") skipped anchor_command, and the stored head is only a head; a
+    # full seal of the same head writes a new checkpoint so that anchor_command gets it too.
+    full = [c for w, c in same if c.get("reason") != "executed" and w != STORED_HEAD]
+    if full or (same and not run_anchor_command):
+        return SealResult("unchanged", checkpoint=(full or [c for _, c in same])[-1])
 
     cp = {"hg_checkpoint": CHECKPOINT_VERSION, "head_hash": head, "records": count,
           "ts": provenance.now_ts(), "ledger": str(root.resolve()), "ledger_id": recs[0]["hash"],
@@ -480,7 +487,7 @@ def seal(ledger_dir: Path, *, policy=None, reviewer_model: str | None = None, re
     remembered = _remember_head(root, cp)
     if remembered:
         res.warnings.append(remembered)
-    res.anchored, anchor_problems = anchor(cp, policy)
+    res.anchored, anchor_problems = anchor(cp, policy, run_command=run_anchor_command)
     res.warnings += anchor_problems
     for w in res.warnings:
         log(f"receipts: {w}")
@@ -491,7 +498,7 @@ def anchor_name(cp: dict) -> str:
     return f"{ANCHOR_PREFIX}{str(cp.get('ledger_id'))[:12]}-{int(cp['records']):09d}-{cp['head_hash'][:16]}"
 
 
-def anchor(cp: dict, policy) -> tuple[list[str], list[str]]:
+def anchor(cp: dict, policy, run_command: bool = True) -> tuple[list[str], list[str]]:
     """Append the checkpoint to every configured anchor. Returns (where it went, what failed)."""
     done, failed = [], []
     if policy is None:
@@ -514,7 +521,7 @@ def anchor(cp: dict, policy) -> tuple[list[str], list[str]]:
             done.append(str(d / f"{name}.json"))
         except OSError as e:
             failed.append(f"WARNING: could not anchor to {d}: {e}")
-    if policy.anchor_command:
+    if policy.anchor_command and run_command:
         with tempfile.TemporaryDirectory(prefix="hg-anchor-") as td:
             f = Path(td) / f"{name}.json"
             f.write_text(body)

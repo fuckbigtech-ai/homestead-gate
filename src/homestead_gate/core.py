@@ -22,6 +22,7 @@ import hashlib
 import inspect
 import json
 import math
+import sys
 import unicodedata
 import threading
 import uuid
@@ -198,7 +199,8 @@ class Gate:
     def __init__(self, *, policy: Policy, reviewer: Reviewer, approver: Approver, ledger_dir: Path,
                  task: str, session: str, outbox: Path, smtp: dict | None = None, live: bool = False,
                  lookup: "web_lookup.TavilyLookup | None" = None, lookup_cache: dict | None = None,
-                 mac_key: bytes | None = None):
+                 mac_key: bytes | None = None, keys: "receipts.Keys | None" = None,
+                 seal_log=None):
         self.policy, self.reviewer, self.approver = policy, reviewer, approver
         # Optional web lookup of unknown recipients (lookup.py). None means off. Its results are
         # for the human only; see _recipient_context. The cache is per target for the session; a
@@ -209,7 +211,13 @@ class Gate:
         self.outbox, self.smtp, self.live = Path(outbox), smtp, live
         # The receipt ledger's MAC key (receipts.py), from the OS credential store. The caller fetches
         # it once; None (tests, the demo, no credential store) writes plain records as before.
-        self.mac_key = mac_key
+        self.mac_key = mac_key if mac_key is not None or keys is None else keys.mac_key
+        # With the full ledger keys, every executed action is sealed at once (receipts.seal, reason
+        # "executed"): local checkpoint, stored head and anchor_dir, not anchor_command. So deleting the
+        # newest records is caught from the last executed action on, not only from the session's end.
+        self.keys = keys
+        self._seal_log = seal_log or (lambda s: print(s, file=sys.stderr))
+        self._seal_lock = threading.Lock()
         # Payload hashes a human refused in this session: denied, or held by a scheduled pass. An identical
         # retry is refused by policy without a second review or a second question. Not stored: policy
         # denies (they repeat on their own, and the hourly cap lifts), and a terminal card nobody answered
@@ -484,4 +492,17 @@ class Gate:
             return {"id": rid, "status": "failed", "error": str(e)}
         post("gate.executed", "executed" + (" (dry run)" if result.get("dry_run") else ""),
              result=receipt_result(result, self.policy.receipt_calldata))
+        self._seal_executed()
         return {"id": rid, "status": "executed", "by": decided_by, "result": result}
+
+    def _seal_executed(self) -> None:
+        """The action already ran: a seal that fails or refuses is reported, never raised."""
+        if self.keys is None:
+            return
+        try:
+            with self._seal_lock:
+                receipts.seal(self.ledger_dir, policy=self.policy, reason="executed", keys=self.keys,
+                              reviewer_model=getattr(self.reviewer, "model", None) or self.policy.model,
+                              log=self._seal_log, run_anchor_command=False)
+        except Exception as e:  # noqa: BLE001
+            self._seal_log(f"receipts: WARNING: no checkpoint after this action: {type(e).__name__}: {e}")

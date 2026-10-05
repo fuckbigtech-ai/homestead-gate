@@ -100,15 +100,19 @@ def test_checkpoint_is_signed_compatible_with_hsm_and_carries_the_context(tmp_pa
 def test_a_checkpoint_is_written_after_every_scheduled_pass(tmp_path):
     data = seeded(tmp_path)
     p, _, _ = run_pass(data, FIRST, now=datetime(2026, 10, 2, 7, 0))
-    cps = (data / "ledger" / receipts.CHECKPOINTS_FILE).read_text().splitlines()
-    assert len(cps) == 1 and not p.receipts_refused
-    first = json.loads(cps[0])
-    assert first["reason"] == "scheduled-pass" and first["signed"] and first["reviewer_model"] == "fake"
+    # (plus one "executed" checkpoint per action the pass ran, written as each one ran)
+    cps = [json.loads(x) for x in (data / "ledger" / receipts.CHECKPOINTS_FILE).read_text().splitlines()]
+    passes = [c for c in cps if c["reason"] == "scheduled-pass"]
+    assert len(passes) == 1 and not p.receipts_refused and cps[-1] is passes[0]
+    assert {c["reason"] for c in cps} <= {"scheduled-pass", "executed"}
+    first = passes[0]
+    assert first["signed"] and first["reviewer_model"] == "fake"
     assert first["records"] == len(ledger.read_all(data / "ledger"))
     asst.deliver_later_mail(data)
     run_pass(data, [calls(call("read_email", id="msg-001"))] + SECOND, now=datetime(2026, 10, 2, 7, 15))
-    cps = (data / "ledger" / receipts.CHECKPOINTS_FILE).read_text().splitlines()
-    assert len(cps) == 2 and json.loads(cps[1])["records"] == len(ledger.read_all(data / "ledger"))
+    cps = [json.loads(x) for x in (data / "ledger" / receipts.CHECKPOINTS_FILE).read_text().splitlines()]
+    passes = [c for c in cps if c["reason"] == "scheduled-pass"]
+    assert len(passes) == 2 and passes[1]["records"] == len(ledger.read_all(data / "ledger"))
     m = receipts.verify_macs(ledger.read_all(data / "ledger"), keys().mac_key)
     assert m.ok and m.checked == len(ledger.read_all(data / "ledger"))   # every record of every pass is keyed
 
@@ -128,10 +132,12 @@ def test_a_checkpoint_is_written_when_a_gate_session_ends(tmp_path, monkeypatch)
     monkeypatch.setattr("homestead_gate.daemon.make_server", lambda g, port: Server(g, port))
     monkeypatch.setattr(cli, "HOME", tmp_path / "home")
     assert cli._serve(policy, argparse.Namespace(ledger=str(led), port=0), "email me", None) == 0
-    cp = json.loads((led / receipts.CHECKPOINTS_FILE).read_text())
+    cps = [json.loads(x) for x in (led / receipts.CHECKPOINTS_FILE).read_text().splitlines()]
+    # one checkpoint as each request executed (4 and 7 records), then the session's own at the end:
     # 7 = the policy.loaded receipt (written at startup, MAC'd like the rest) + 3 per request
-    assert cp["reason"] == "session-end" and cp["records"] == 7 and cp["signed"]
-    assert len(anchored(anchors)) == 1
+    assert [(c["reason"], c["records"]) for c in cps] == [("executed", 4), ("executed", 7), ("session-end", 7)]
+    assert all(c["signed"] for c in cps)
+    assert len(anchored(anchors)) == 2               # anchor_dir file names are per head: 4 and 7
     assert receipts.verify_macs(ledger.read_all(led), keys().mac_key).checked == 7
 
 
@@ -495,3 +501,46 @@ def test_egress_records_get_a_mac_when_the_key_exists(tmp_path, monkeypatch, led
         assert receipts.verify_macs(recs, keys().mac_key).ok
         rebuild(led, edit=len(recs) - 1)                          # the blocked host's record, rewritten
         assert receipts.verify_macs(ledger.read_all(led), keys().mac_key).bad
+
+
+def test_each_executed_action_is_sealed_so_tail_truncation_is_caught_before_the_session_ends(tmp_path, monkeypatch):
+    # Before: checkpoints only at session ends, passes and watch; the newest records of a running
+    # session could be deleted with nothing to catch it.
+    sent = tmp_path / "sent"
+    policy = Policy(user_email=ME, user_wallet=WALLET, anchor_command=f"cat >> {shlex.quote(str(sent))}")
+    g = Gate(policy=policy, reviewer=FakeReviewer("block"), approver=scripted(), ledger_dir=tmp_path / "l",
+             task="t", session="s", outbox=tmp_path / "out", keys=keys())
+    fill(g, 2)
+    led = tmp_path / "l"
+    cps = [json.loads(x) for x in (led / receipts.CHECKPOINTS_FILE).read_text().splitlines()]
+    assert [(c["reason"], c["records"]) for c in cps] == [("executed", 4), ("executed", 7)]
+    assert not sent.exists()                                    # anchor_command waits for a full seal
+    f = led / LEDGER_FILE
+    f.write_text("".join(x + "\n" for x in f.read_text().splitlines()[:-1]))     # drop the newest record
+    assert ledger.verify_chain(led) == []
+    assert receipts.check_stored_head(led, ledger.read_all(led))                  # caught already
+    assert cli_main(["watch", "--ledger", str(led), "--no-checkpoint"]) == 1
+
+
+def test_a_full_seal_after_a_per_action_seal_still_runs_anchor_command(tmp_path):
+    sent = tmp_path / "sent"
+    policy = Policy(user_email=ME, user_wallet=WALLET, anchor_command=f"cat >> {shlex.quote(str(sent))}")
+    g = Gate(policy=policy, reviewer=FakeReviewer("block"), approver=scripted(), ledger_dir=tmp_path / "l",
+             task="t", session="s", outbox=tmp_path / "out", keys=keys())
+    fill(g, 1)
+    r = receipts.seal(tmp_path / "l", policy=policy, reason="session-end", keys=keys(), log=lambda s: None)
+    assert r.status == "written" and r.checkpoint["records"] == 4 and "anchor_command" in r.anchored
+    assert json.loads(sent.read_text())["reason"] == "session-end"
+    assert receipts.seal(tmp_path / "l", policy=policy, reason="watch", keys=keys(),
+                         log=lambda s: None).status == "unchanged"
+
+
+def test_a_failing_per_action_seal_never_fails_the_action(tmp_path, monkeypatch):
+    said = []
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(receipts, "seal", boom)
+    g = Gate(policy=Policy(user_email=ME), reviewer=FakeReviewer(), approver=scripted(), ledger_dir=tmp_path / "l",
+             task="t", session="s", outbox=tmp_path / "out", keys=keys(), seal_log=said.append)
+    r = g.submit({"action": {"type": "email", "to": ME, "subject": "s", "body": "b"}})
+    assert r["status"] == "executed" and "disk full" in said[0]
