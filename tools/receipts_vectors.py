@@ -4,7 +4,7 @@
     python tools/receipts_vectors.py generate [DIR]     write the vectors (default docs/receipts-vectors)
     python tools/receipts_vectors.py verify [DIR]       check them; exit 0 only if every check passes
 
-generate drives the gate's real writer (receipts.append over homestead-memory's ledger.append) with a
+generate drives the gate's real writer (receipts.append, homestead-memory's ledger.append format) with a
 fixed clock, fixed request ids and a fixed TEST key, so every byte is reproducible. The checkpoints are
 built field for field like receipts.seal() builds them, with a fixed ledger path in place of the real
 absolute one (tests/test_receipts_spec.py checks that against seal() itself).

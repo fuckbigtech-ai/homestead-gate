@@ -334,7 +334,8 @@ mac    = hex( HMAC-SHA256( mac_key, C_rec( record without "hash", with meta.hg_m
 - `n` counts MAC'd records per (ledger, session), starting at 0. A Gate resuming a session continues
   from the highest `n` already in the file for that session (v1 records included).
 - `began` is the `seq` of the first record in this ledger that has a MAC (this record's own `seq` if
-  there is none yet), as the writer saw it under the lock. Every v2 record restates it.
+  there is none yet), as the writer saw it under the lock. Every v2 record restates it. It names a record,
+  not a session; the session where MACs began is that record's `session`.
 
 Version 1 (records written before 2026-10-05) is still verified:
 
@@ -392,7 +393,14 @@ also replaces `.hsm/ledger.sig`. Anchor files hold `json.dumps(cp, sort_keys=Tru
   `--no-checkpoint`). These run `anchor_command` too.
 
 So the newest record a checkpoint can miss is one written after the last executed action: a request
-still being decided, a denial, or a policy record. A full seal of a head that only an `executed`
+still being decided, a denial, or a policy record.
+
+Cost, measured 2026-10-05 on an Apple M-series laptop with a 10,000-record keyed ledger: about 200 ms per
+per-action seal, of which about 125 ms holds the ledger lock (one read and chain check under the lock; MAC
+checks and signing run after it). It grows linearly with the ledger. Not included: the macOS `security`
+call that stores the head (a subprocess per seal; tests use a fake store). Other writers wait for the lock
+up to 10 seconds and then fail closed, so a ledger of several hundred thousand records would need an
+incremental check before per-action sealing is safe; **not implemented**. A full seal of a head that only an `executed`
 checkpoint (or the stored head) has named writes a new checkpoint, so `anchor_command` still receives it.
 
 ### 7.3 Seal refuses to launder a rebuild
@@ -707,7 +715,7 @@ as `success`, `egress.denied` (a blocked connection) exports as `success`, and n
 | MACs did not cover `seq`, `ts`, `prev_hash` | MAC v2 covers the whole record; the gate writes keyed records under the ledger lock itself (3.1, 6.2) | v1 records still verify; `hg_mac.v` tells them apart |
 | `policy.*` and `egress.*` records without a MAC were not flagged; egress never had a MAC | flagged after MACs began (egress after the first v2 record); `run` MACs egress when the key exists (5.5, 8) | older unkeyed egress records are not flagged |
 | a MAC-stripped first stretch read as pre-MAC history | `began` in every v2 MAC, and v2's `prev_hash` binding (6.2, 8) | v1-only ledgers unchanged (Section 15) |
-| `--signer` let unsigned checkpoints pass | an unsigned checkpoint fails when a signer is pinned (8, step 3) | none |
+| `--signer` let unsigned checkpoints pass | an unsigned checkpoint fails when a signer is pinned (8, step 3) | an auditor who pins a signer over anchors that include unsigned checkpoints (written before a key or `cryptography` was available) now gets a failure for those; drop the pin or check them separately |
 | `1` vs `1.0`, address case and calldata case gave different fingerprints; file and code policies different versions | hash scheme 2 (4) | file-loaded policy versions change once; `policy.changed` records it; written records keep their values |
 | calldata in `gate.executed` | digest and length unless `record_calldata` (5.2, 10) | none |
 | `read_sources` unbounded; 300-character raw errors | capped and cleaned (5.2) | none |

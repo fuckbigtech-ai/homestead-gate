@@ -468,6 +468,12 @@ def cmd_run(a) -> int:
     # egress records get a MAC like gate records when this machine already has the ledger key (`up`
     # creates it). Loaded, never created here: `run` must not plant a key the gate never used.
     keys = receipts.ledger_keys(create=False, warn=_err)
+    if keys is None and (led / hl.LEDGER_REL).exists() and any(
+            isinstance((r.get("meta") or {}).get(receipts.MAC_FIELD), dict)
+            and r["meta"][receipts.MAC_FIELD].get("v") == 2 for r in hl.read_all(led)):
+        _err("  !! WARNING: this ledger has keyed (v2) records but the ledger key could not be read here. Blocked "
+             "egress will be recorded WITHOUT a MAC, and the gate will then refuse to checkpoint this ledger "
+             "(an unkeyed egress record after keyed ones looks forged). Unlock the credential store and rerun.")
 
     import time as _time
     last: dict[str, float] = {}

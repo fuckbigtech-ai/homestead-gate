@@ -544,3 +544,14 @@ def test_a_failing_per_action_seal_never_fails_the_action(tmp_path, monkeypatch)
              task="t", session="s", outbox=tmp_path / "out", keys=keys(), seal_log=said.append)
     r = g.submit({"action": {"type": "email", "to": ME, "subject": "s", "body": "b"}})
     assert r["status"] == "executed" and "disk full" in said[0]
+
+
+def test_run_warns_when_it_cannot_key_egress_on_a_keyed_ledger(tmp_path, monkeypatch, ledger_key_store, capsys):
+    from homestead_gate import sandbox
+    fill(gate(tmp_path), 1)                                       # v2 records exist
+    ledger_key_store.key, saved = None, ledger_key_store.key      # the key cannot be read in this process
+    monkeypatch.setattr(sandbox, "run", lambda cmd, *, on_deny, **kw: on_deny("evil.example", "no") or 0)
+    assert cli_main(["run", "--ledger", str(tmp_path / "l"), "--", "true"]) == 0
+    assert "WITHOUT a MAC" in capsys.readouterr().err
+    ledger_key_store.key = saved
+    assert receipts.verify_macs(ledger.read_all(tmp_path / "l"), keys().mac_key).stripped   # what it warned about
