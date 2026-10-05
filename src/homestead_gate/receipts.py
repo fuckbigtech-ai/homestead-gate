@@ -574,6 +574,9 @@ def verify_anchors(ledger_dir: Path, anchor_dir: Path, signer: str | None = None
             continue
         label = f"{int(cp['records'])} records at {cp.get('ts')} ({p.name})"
         sig_problem = check_signatures(cp)
+        if not sig_problem and signer is not None and not cp.get("signature"):
+            # anyone can write an unsigned checkpoint; with a pinned signer it proves nothing
+            sig_problem = "unsigned, and a signer is pinned (--signer)"
         if sig_problem:
             rep.ok = False
             say(f"!! anchored checkpoint {label}: {sig_problem}")

@@ -497,6 +497,8 @@ def check_checkpoint(cp: dict, recs: list[dict], signer: str | None = None) -> l
     """Spec 8, step 3."""
     problems = []
     if not cp.get("signature"):
+        if signer is not None:
+            return [f"checkpoint at {cp.get('records')} records: unsigned, and a signer is pinned"]
         return [] if cp.get("signed") is False and _extends(cp, recs) is None else \
             [_extends(cp, recs) or "unsigned checkpoint that does not say it is unsigned"]
     if signer is not None and cp.get("signer_pubkey") != signer:

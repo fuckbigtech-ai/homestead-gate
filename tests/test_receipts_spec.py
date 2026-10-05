@@ -314,7 +314,8 @@ def test_a_began_marker_after_the_first_keyed_record_is_reported():
     assert any("MACs began at record 0" in p for p in rv.check_macs(recs, KEYS.mac_key))
 
 
-def test_the_signer_pin_does_not_apply_to_an_unsigned_anchor(tmp_path):
+def test_the_signer_pin_rejects_an_unsigned_anchor(tmp_path):
+    # Before: an honestly unsigned anchor passed even with --signer set.
     led = as_ledger(tmp_path)
     recs = ledger.read_all(led)
     cp = {"hg_checkpoint": 1, "head_hash": recs[-1]["hash"], "records": len(recs), "ts": "t",
@@ -323,7 +324,11 @@ def test_the_signer_pin_does_not_apply_to_an_unsigned_anchor(tmp_path):
     d = tmp_path / "a"
     d.mkdir()
     (d / f"{receipts.anchor_name(cp)}.json").write_text(json.dumps(cp))
-    assert receipts.verify_anchors(led, d, signer=KEYS.pubkey).ok        # passes despite --signer
+    rep = receipts.verify_anchors(led, d, signer=KEYS.pubkey)
+    assert not rep.ok and any("signer is pinned" in x for x in rep.lines)
+    assert receipts.verify_anchors(led, d).ok                             # no pin: unsigned is still allowed
+    assert rv.check_checkpoint(cp, ledger.read_all(led), signer=KEYS.pubkey)
+    assert rv.check_checkpoint(cp, ledger.read_all(led)) == []
 
 
 def test_executed_wallet_receipts_carry_the_calldata(tmp_path):
