@@ -44,7 +44,8 @@ yes. The cloud does the thinking. Your machine has the veto. The cloud can't vot
 git clone https://github.com/fuckbigtech-ai/homestead-gate && cd homestead-gate
 pip install -e .                                   # not on PyPI yet
 export NEBIUS_API_KEY=...                          # Nebius Token Factory
-ollama pull nemotron-3-nano:4b                     # the local reviewer
+ollama pull hf.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M   # the local reviewer: NVIDIA's file, the one we measured
+ollama cp hf.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M nemotron-3-nano:4b
 homestead-gate assistant --skill triage            # go through the inbox; anything outbound waits for the gate
 homestead-gate assistant --watch --every 15m       # always on: new mail only, a brief each pass
 ```
@@ -67,7 +68,8 @@ second question. Everything the assistant sends goes through the
 
 ```bash
 export NEBIUS_API_KEY=...                                    # Nebius Token Factory (default backend)
-ollama pull nemotron-3-nano:4b                               # the local reviewer
+ollama pull hf.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M   # the local reviewer (the measured file; see MODEL_RISK.md)
+ollama cp hf.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M nemotron-3-nano:4b
 homestead-gate assistant --smoke                             # one live call with one tool, then exit
 homestead-gate assistant --skill triage                      # one run of a skill, approvals in this terminal
 homestead-gate assistant --watch --every 15m                 # always on: new mail only, a brief each pass

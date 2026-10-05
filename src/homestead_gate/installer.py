@@ -124,8 +124,14 @@ def install_hint(system: str) -> str:
     return "download it from https://ollama.com/download"
 
 
+# Where to fetch a reviewer so it is the exact file our numbers were measured on (MODEL_RISK.md): the Ollama
+# library's nemotron-3-nano:4b is a different file from NVIDIA's GGUF, which the AgentDojo runs used.
+MEASURED_SOURCE = {"nemotron-3-nano:4b": "hf.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M"}
+
+
 def pull_command(model: str) -> str:
-    return f"ollama pull {model}"
+    src = MEASURED_SOURCE.get(model)
+    return f"ollama pull {src} && ollama cp {src} {model}" if src else f"ollama pull {model}"
 
 
 def size_note(model: str) -> str:
@@ -139,7 +145,7 @@ def pull(model: str, *, which: Callable[[str], str | None] | None = None,
     which, call = which or shutil.which, call or subprocess.call
     guard = which("model-load-guard")
     if guard:
-        rc = call([guard, f"ollama pull {model}"])
+        rc = call([guard, f"ollama pull {MEASURED_SOURCE.get(model, model)}"])
         if rc != 0:
             out(f"  model-load-guard refused (exit {rc}); not pulling. Free memory/disk and retry.")
             return rc
@@ -148,7 +154,11 @@ def pull(model: str, *, which: Callable[[str], str | None] | None = None,
     if not which("ollama"):
         out("  ollama is not installed; cannot pull.")
         return 1
-    return call(["ollama", "pull", model])
+    src = MEASURED_SOURCE.get(model, model)
+    rc = call(["ollama", "pull", src])
+    if rc == 0 and src != model:
+        rc = call(["ollama", "cp", src, model])        # same weights, the name the policy uses
+    return rc
 
 
 # ---- sandbox ------------------------------------------------------------------------------

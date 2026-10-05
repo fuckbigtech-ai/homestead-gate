@@ -225,7 +225,8 @@ def test_up_picks_nemotron_on_8gb(env, capsys):
     cli_main(["up", "--yes", "--email", "t@example.com", "--task", "x", *env.args])
     assert Policy.load(env.pol).model == "nemotron-3-nano:4b"
     out = capsys.readouterr().out
-    assert "10%" in out and "ollama pull nemotron-3-nano:4b  (2.8GB download)" in out and "WARNING" in out
+    assert "10%" in out and ("ollama pull hf.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M && ollama cp "
+            "hf.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M nemotron-3-nano:4b  (2.8GB download)") in out and "WARNING" in out
 
 
 def test_up_refuses_on_4gb(env, capsys):
@@ -338,3 +339,13 @@ def test_sandbox_backend_by_os():
     assert installer.sandbox_backend("darwin", lambda n: "/usr/bin/sandbox-exec") == (True, "sandbox-exec")
     assert installer.sandbox_backend("darwin", lambda n: None)[0] is False
     assert installer.sandbox_backend("linux", lambda n: "/x")[0] is False
+
+
+def test_the_4b_is_fetched_as_the_measured_nvidia_file():
+    src = "hf.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M"
+    assert installer.pull_command("nemotron-3-nano:4b") == f"ollama pull {src} && ollama cp {src} nemotron-3-nano:4b"
+    assert installer.pull_command("qwen3.5:9b") == "ollama pull qwen3.5:9b"
+    calls = []
+    rc = installer.pull("nemotron-3-nano:4b", which=lambda n: "/x/ollama" if n == "ollama" else None,
+                        call=lambda argv: calls.append(argv) or 0, out=lambda s: None)
+    assert rc == 0 and calls == [["ollama", "pull", src], ["ollama", "cp", src, "nemotron-3-nano:4b"]]
