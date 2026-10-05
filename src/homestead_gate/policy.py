@@ -26,7 +26,7 @@ DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Settings that are not rules about actions, so they stay out of `version`: the [receipts] anchors,
 # and the [lookup] switch, whose text goes only to the human and never changes a decision. Changing
 # them must not invalidate approvals or payload hashes (the policy receipt's file hash still moves).
-_NOT_RULES = frozenset({"anchor_dir", "anchor_command", "lookup_tavily"})
+_NOT_RULES = frozenset({"anchor_dir", "anchor_command", "lookup_tavily", "receipt_calldata"})
 
 
 # How rules and actions are hashed. 1: Python's repr of whatever types arrived (TOML gave floats where the
@@ -100,6 +100,9 @@ class Policy:
     # are left out of `version` (an anchor change must not invalidate approvals or payload hashes).
     anchor_dir: str = ""
     anchor_command: str = ""
+    # [receipts] record_calldata = true: keep an executed transaction's calldata in the receipt. Off by
+    # default: the receipt carries its sha256 and length only (action content by fingerprint, not text).
+    receipt_calldata: bool = False
     # Where this policy came from and the sha256 of the exact bytes parsed. Underscored, so the rule
     # hash (version) does not move when only the comments in the file change; the receipts carry both.
     _path: Path | None = field(default=None, repr=False)
@@ -133,6 +136,7 @@ class Policy:
             dual_control=_dual_control(ap),
             _path=Path(path).expanduser().resolve(), _file_sha256=hashlib.sha256(raw).hexdigest(),
             anchor_dir=str(rc.get("anchor_dir", "")), anchor_command=str(rc.get("anchor_command", "")),
+            receipt_calldata=rc.get("record_calldata", False) is True,
         )
         for key, val in (("digest", p.review_digest), ("manifest_digest", p.review_manifest_digest)):
             if val and not DIGEST_RE.fullmatch(val):

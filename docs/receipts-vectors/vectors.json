@@ -66,6 +66,7 @@
  "session": "vectors",
  "signer_pubkey": "98b108bfe5783ab421ae5bdde1f294e5050fecaecc932b2d43d30a194541fc45",
  "spec": "Agent Action Receipts v0.1",
+ "task": "email my friend",
  "test_master_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
  "warning": "PUBLIC TEST KEY. Never use it for a real ledger."
 }

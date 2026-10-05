@@ -150,7 +150,7 @@ def test_vector_records_have_exactly_the_fields_the_gate_writes(tmp_path, monkey
                     review_digest=ident.digest, review_manifest_digest=ident.manifest_digest)
     reviewer = pin.PinnedReviewer(ScriptedInner(["approve", "block", "block"]), policy)
     g = Gate(policy=policy, reviewer=reviewer, approver=scripted("n", "y", "send anyway", "y"),
-             ledger_dir=tmp_path / "l", task="email my friend", session="t", outbox=tmp_path / "o",
+             ledger_dir=tmp_path / "l", task=rv.TASK, session="t", outbox=tmp_path / "o",
              lookup=lookup.TavilyLookup("k", transport=FakeTavily()), mac_key=KEYS.mac_key)
     for r in rv._requests():
         g.submit({"action": r["action"], "read": r.get("read", [])})
@@ -331,12 +331,62 @@ def test_the_signer_pin_rejects_an_unsigned_anchor(tmp_path):
     assert rv.check_checkpoint(cp, ledger.read_all(led)) == []
 
 
-def test_executed_wallet_receipts_carry_the_calldata(tmp_path):
-    g = Gate(policy=Policy(user_email=rv.ME, user_wallet=rv.WALLET), reviewer=None, approver=scripted(),
-             ledger_dir=tmp_path / "l", task="t", session="t", outbox=tmp_path / "o")
-    g.submit({"action": {"type": "wallet_tx", "chain_id": 11155111, "to": rv.WALLET, "value_eth": 0.001,
-                         "data": "0xdeadbeef"}})                         # to self: policy auto-approves
-    assert "0xdeadbeef" in (tmp_path / "l" / ledger.LEDGER_REL).read_text()
+@pytest.mark.parametrize("opt_in", [False, True])
+def test_executed_wallet_receipts_carry_calldata_by_digest_unless_opted_in(tmp_path, opt_in):
+    # Before: the calldata itself was in gate.executed.result.unsigned_tx.data.
+    import hashlib
+    g = Gate(policy=Policy(user_email=rv.ME, user_wallet=rv.WALLET, receipt_calldata=opt_in), reviewer=None,
+             approver=scripted(), ledger_dir=tmp_path / "l", task="t", session="t", outbox=tmp_path / "o")
+    res = g.submit({"action": {"type": "wallet_tx", "chain_id": 11155111, "to": rv.WALLET, "value_eth": 0.001,
+                               "data": "0xDEADbeef"}})                   # to self: policy auto-approves
+    assert res["result"]["unsigned_tx"]["data"] == "0xDEADbeef"           # the caller still gets the tx
+    text = (tmp_path / "l" / ledger.LEDGER_REL).read_text()
+    assert ("deadbeef" in text.lower()) is opt_in
+    tx = ledger.read_all(tmp_path / "l")[-1]["meta"]["result"]["unsigned_tx"]
+    if not opt_in:
+        assert tx["data_sha256"] == hashlib.sha256(bytes.fromhex("deadbeef")).hexdigest() and tx["data_bytes"] == 4
+        assert "data" not in tx
+    p = tmp_path / "p.toml"
+    p.write_text('[user]\nemail = "me@example.com"\n[receipts]\nrecord_calldata = true\n')
+    assert Policy.load(p).receipt_calldata and Policy.load(p).version == Policy(user_email=rv.ME).version
+
+
+def test_read_sources_are_capped_and_cleaned(tmp_path):
+    from homestead_gate import core
+    g = Gate(policy=Policy(user_email=rv.ME), reviewer=None, approver=scripted(), ledger_dir=tmp_path / "l",
+             task="t", session="t", outbox=tmp_path / "o")
+    reads = [{"source": f"web:{i}\x1b[2K\nFAKE LINE\u202e" + "x" * 500, "content": "c"} for i in range(50)]
+    g.submit({"action": {"type": "email", "to": rv.ME, "subject": "s", "body": "b"}, "read": reads + ["bare"]})
+    m = ledger.read_all(tmp_path / "l")[1]["meta"]
+    assert m["read_sources_dropped"] == 51 - core.MAX_READ_SOURCES
+    assert len(m["read_sources"]) == core.MAX_READ_SOURCES
+    for src in m["read_sources"]:
+        assert len(src) <= core.MAX_SOURCE_CHARS + 3 and src.endswith("...")
+        assert "\n" not in src and "\x1b" not in src and "\u202e" not in src and "FAKE LINE" in src
+
+
+def test_adapter_errors_are_capped_and_cleaned(tmp_path, monkeypatch):
+    from homestead_gate import adapters, core
+    def boom(*a, **k):
+        raise RuntimeError("smtp said:\r\n250 OK\x1b[31m" + "y" * 1000)
+    monkeypatch.setattr(adapters, "send_email", boom)
+    g = Gate(policy=Policy(user_email=rv.ME), reviewer=None, approver=scripted(), ledger_dir=tmp_path / "l",
+             task="t", session="t", outbox=tmp_path / "o")
+    assert g.submit({"action": {"type": "email", "to": rv.ME, "subject": "s", "body": "b"}})["status"] == "failed"
+    err = ledger.read_all(tmp_path / "l")[-1]["meta"]["error"]
+    assert len(err) == core.MAX_ERROR_CHARS + 3 and "\r" not in err and "\n" not in err and "\x1b" not in err
+
+
+def test_the_task_is_recorded_by_hash_only(tmp_path):
+    import hashlib
+    task = "pay the plumber's invoice from Tuesday"
+    g = Gate(policy=Policy(user_email=rv.ME), reviewer=None, approver=scripted(), ledger_dir=tmp_path / "l",
+             task=task, session="t", outbox=tmp_path / "o")
+    g.submit({"action": {"type": "email", "to": rv.ME, "subject": "s", "body": "b"}})
+    text = (tmp_path / "l" / ledger.LEDGER_REL).read_text()
+    assert "plumber" not in text
+    req = [r for r in ledger.read_all(tmp_path / "l") if r["action"] == "gate.request"][0]
+    assert req["meta"]["task_sha256"] == hashlib.sha256(task.encode()).hexdigest()
 
 
 def test_mac_is_unchecked_without_the_key():

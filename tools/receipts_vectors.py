@@ -34,6 +34,7 @@ LEDGER_PATH = "/vectors/ledger"              # stands in for the absolute ledger
 POLICY_PATH = "/vectors/policy.toml"
 CLOCK_START = "2026-10-05T12:00:00"          # one second per timestamp the writer asks for
 ME, WALLET, FRIEND = "me@example.com", "0x" + "1" * 40, "friend@example.org"
+TASK = "email my friend"                     # the human's task; receipts carry only its sha256
 ZERO = "0x" + "0" * 40
 QWEN_9B = "sha256:dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c"
 MANIFEST = "sha256:" + "ab" * 32
@@ -217,6 +218,7 @@ def generate(out_dir: Path = DEFAULT_DIR) -> Path:
                 pre = lambda act, s, **m: log(act, s, {**base, **m}, PRE, target)
                 post = lambda act, s, **m: log(act, s, {**base, **m}, POST, target)
                 pre("gate.request", f"request {describe(a)}", to=a.get("to"),
+                    task_sha256=hashlib.sha256(TASK.encode("utf-8")).hexdigest(),
                     read_sources=[str(x.get("source", "?")) for x in r.get("read", [])])
                 return pre, post
 
@@ -286,7 +288,7 @@ def generate(out_dir: Path = DEFAULT_DIR) -> Path:
     meta = {"spec": "Agent Action Receipts v0.1", "warning": "PUBLIC TEST KEY. Never use it for a real ledger.",
             "test_master_key_hex": TEST_MASTER_KEY.hex(), "mac_key_hex": keys.mac_key.hex(),
             "signer_pubkey": keys.pubkey, "session": SESSION, "agent": AGENT, "ledger_path": LEDGER_PATH,
-            "policy_toml": POLICY_TOML, "policy_version": pv, "policy_sha256": psha,
+            "policy_toml": POLICY_TOML, "policy_version": pv, "policy_sha256": psha, "task": TASK,
             "requests": [{"request_id": r["rid"], "action": r["action"]} for r in _requests()]}
     _dump(out_dir / "vectors.json", meta)
     _dump(out_dir / "fingerprints.json", fingerprints)
@@ -613,6 +615,10 @@ def verify(vec_dir: Path = DEFAULT_DIR, *, ledger_text: str | None = None, mac_k
         cp = json.loads(p.read_text())
         if cp not in cps:
             problems.append(f"anchor {p.name} is not in checkpoints.jsonl")
+    want_task = hashlib.sha256(meta["task"].encode("utf-8")).hexdigest()
+    for r in recs:
+        if r.get("action") == "gate.request" and (r.get("meta") or {}).get("task_sha256") != want_task:
+            problems.append(f"seq {r.get('seq')}: task_sha256 is not the published task's")
     # payloads published next to the ledger: recompute each request's fingerprint
     by_rid = {r["request_id"]: r["action"] for r in meta["requests"]}
     for r in recs:

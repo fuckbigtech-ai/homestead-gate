@@ -22,6 +22,7 @@ import hashlib
 import inspect
 import json
 import math
+import unicodedata
 import threading
 import uuid
 from dataclasses import replace
@@ -138,6 +139,52 @@ def canonical_action(action: dict) -> dict:
 def payload_hash(action: dict, policy_version: str = "") -> str:
     body = {"action": canonical_action(action), "policy_version": policy_version}
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+# What the agent says it read goes into gate.request as labels only, and the agent controls them.
+MAX_READ_SOURCES = 20
+MAX_SOURCE_CHARS = 120
+MAX_ERROR_CHARS = 200
+
+
+def clean_text(s, limit: int) -> str:
+    """Printable, single-line, at most `limit` characters (plus "..." when cut). Control and format
+    characters (newlines, ANSI escapes, bidi overrides) are dropped: they could fake lines in a
+    terminal or reorder what an auditor reads."""
+    t = "".join(ch for ch in str(s) if unicodedata.category(ch) not in ("Cc", "Cf"))
+    return t if len(t) <= limit else t[:limit] + "..."
+
+
+def read_sources(reads: list) -> dict:
+    srcs = [clean_text(r.get("source", "?"), MAX_SOURCE_CHARS) for r in reads]
+    out = {"read_sources": srcs[:MAX_READ_SOURCES]}
+    if len(srcs) > MAX_READ_SOURCES:
+        out["read_sources_dropped"] = len(srcs) - MAX_READ_SOURCES
+    return out
+
+
+def calldata_digest(data) -> dict:
+    """Calldata for a receipt: SHA-256 of the bytes (hex-decoded, 0x and case ignored) and their count.
+    Text that is not hex is hashed as UTF-8, with data_bytes null."""
+    h = str(data or "").strip().lower().removeprefix("0x")
+    try:
+        raw = bytes.fromhex(h)
+    except ValueError:
+        return {"data_sha256": hashlib.sha256(str(data).encode("utf-8")).hexdigest(), "data_bytes": None}
+    return {"data_sha256": hashlib.sha256(raw).hexdigest(), "data_bytes": len(raw)}
+
+
+def receipt_result(result: dict, keep_calldata: bool) -> dict:
+    """The adapter's result as the receipt holds it: an unsigned transaction's calldata by digest."""
+    tx = result.get("unsigned_tx")
+    if keep_calldata or not isinstance(tx, dict) or "data" not in tx:
+        return result
+    tx = {k: v for k, v in tx.items() if k != "data"}
+    return {**result, "unsigned_tx": {**tx, **calldata_digest(result["unsigned_tx"]["data"])}}
+
+
+def task_digest(task: str | None) -> str | None:
+    return hashlib.sha256(task.encode("utf-8")).hexdigest() if task else None
 
 
 def describe(action: dict) -> str:
@@ -305,6 +352,8 @@ class Gate:
     def _submit(self, request: dict) -> dict:
         action = dict(request.get("action") or {})
         reads = request.get("read") or []
+        reads = [r if isinstance(r, dict) else {"source": "?", "content": str(r)}
+                 for r in (reads if isinstance(reads, list) else [reads])]
         rid = uuid.uuid4().hex[:10]
         target = f"gate:{action.get('type', '?')}"
         self._check_policy()
@@ -314,8 +363,10 @@ class Gate:
         pre = lambda a, s, **m: self._log(a, s, {**base, **m}, ledger.PHASE_PRE, target)
         post = lambda a, s, **m: self._log(a, s, {**base, **m}, ledger.PHASE_POST, target)
 
+        # task_sha256: the human's task, by hash only, so an auditor holding the task can tie these
+        # decisions to it. The text itself never enters the receipt.
         pre("gate.request", f"request {describe(action)}", to=action.get("to"),
-            read_sources=[str(r.get("source", "?")) for r in reads])
+            task_sha256=task_digest(self.task), **read_sources(reads))
 
         if base["payload_sha256"] in self.refused:
             why = "the same action was already refused in this session"
@@ -429,7 +480,8 @@ class Gate:
             else:
                 result = adapters.prepare_tx(action)
         except Exception as e:  # noqa: BLE001 - any adapter failure is recorded, never swallowed
-            post("gate.failed", f"approved but failed: {type(e).__name__}", error=str(e)[:300])
+            post("gate.failed", f"approved but failed: {type(e).__name__}", error=clean_text(e, MAX_ERROR_CHARS))
             return {"id": rid, "status": "failed", "error": str(e)}
-        post("gate.executed", "executed" + (" (dry run)" if result.get("dry_run") else ""), result=result)
+        post("gate.executed", "executed" + (" (dry run)" if result.get("dry_run") else ""),
+             result=receipt_result(result, self.policy.receipt_calldata))
         return {"id": rid, "status": "executed", "by": decided_by, "result": result}
