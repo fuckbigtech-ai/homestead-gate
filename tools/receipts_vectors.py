@@ -53,7 +53,7 @@ manifest_digest = "{MANIFEST}"
 GENESIS = "0" * 64
 PRE, POST = "pre_execution", "post_execution"
 SIGN_INFO = b"homestead-gate checkpoint ed25519 v1"
-MAC_INFO = b"homestead-gate record mac v1"
+MAC_INFO = b"homestead-gate record mac v1"     # the key derivation label; MAC v2 uses the same key
 TYPED_FIELDS = {
     "email": ("type", "to", "cc", "bcc", "subject", "body", "attachments"),
     "wallet_tx": ("type", "chain_id", "to", "value_eth", "data"),
@@ -349,38 +349,61 @@ def check_chain(text: str) -> list[str]:
 
 
 def mac_input(rec: dict, n: int) -> bytes:
-    """Spec 6.2."""
+    """Spec 6.2, MAC v1 (records written before v2)."""
     meta = {k: v for k, v in (rec.get("meta") or {}).items() if k != "hg_mac"}
     body = {"v": 1, "n": n, "agent": rec.get("agent"), "session": rec.get("session"), "action": rec.get("action"),
             "target": rec.get("target"), "summary": rec.get("summary"), "phase": rec.get("phase"), "meta": meta}
     return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
+def mac_input_v2(rec: dict) -> bytes:
+    """Spec 6.2, MAC v2: the record without `hash`, and without `mac` inside meta.hg_mac."""
+    body = {k: v for k, v in rec.items() if k != "hash"}
+    meta = dict(body.get("meta") or {})
+    meta["hg_mac"] = {k: v for k, v in meta["hg_mac"].items() if k != "mac"}
+    body["meta"] = meta
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _keyed(r: dict) -> bool:
+    return isinstance(r.get("meta"), dict) and isinstance(r["meta"].get("hg_mac"), dict)
+
+
 def check_macs(recs: list[dict], mac_key: bytes) -> list[str]:
     """Spec 8, step 2."""
-    problems, expected, began = [], {}, False
+    problems, expected, began, v2_seen, claims = [], {}, False, False, set()
+    first = next((r.get("seq") for r in recs if _keyed(r)), None)
     for i, r in enumerate(recs):
         meta = r.get("meta") if isinstance(r.get("meta"), dict) else {}
         m = meta.get("hg_mac")
         if not isinstance(m, dict):
-            if began and r.get("agent") == AGENT and str(r.get("action", "")).startswith("gate."):
-                problems.append(f"record {i}: gate record without a MAC after MACs began")
+            act = str(r.get("action", ""))
+            must = act.startswith(("gate.", "policy.")) or (v2_seen and act.startswith("egress."))
+            if began and r.get("agent") == AGENT and must:
+                problems.append(f"record {i}: no MAC after MACs began ({act})")
             continue
         began = True
         try:
             n = int(m["n"])
-            good = hmac.compare_digest(hmac.new(mac_key, mac_input(r, n), hashlib.sha256).hexdigest(),
-                                       str(m.get("mac", "")))
+            inp = mac_input(r, n) if m.get("v") == 1 else mac_input_v2(r) if m.get("v") == 2 else None
+            good = inp is not None and hmac.compare_digest(hmac.new(mac_key, inp, hashlib.sha256).hexdigest(),
+                                                           str(m.get("mac", "")))
         except (KeyError, TypeError, ValueError):
             n, good = None, False
         if not good:
             problems.append(f"record {i}: MAC does not verify")
             continue
+        if m.get("v") == 2:
+            v2_seen = True
+            claims.add(m.get("began"))
         s = str(r.get("session"))
         exp = expected.get(s, 0)
         if n != exp:
             problems.append(f"record {i}: session {s} MAC counter {n}, expected {exp}")
         expected[s] = max(n + 1, exp)
+    for b in claims:
+        if b != first:
+            problems.append(f"MACs began at record {b}, but the first record with a MAC is {first} (MACs stripped)")
     return problems
 
 

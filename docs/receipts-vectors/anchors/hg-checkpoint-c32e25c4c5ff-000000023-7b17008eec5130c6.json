@@ -1,0 +1,19 @@
+{
+ "alg": "ed25519",
+ "attestation": "hsm-checkpoint v1 head=7b17008eec5130c6ec0720475f0a9bfce19f72986481b737b3aab93e8fe73349 records=23 ts=2026-10-05T12:00:47+00:00 pubkey=98b108bfe5783ab421ae5bdde1f294e5050fecaecc932b2d43d30a194541fc45 sig=edd71f6a6312011d2bfd1596558ebd466369087c0967a14550bc6e59afbcd09300749f6d6daa2777b974c4af5cb82fd730534fec151db3780095afc82387a40d",
+ "gate_signature": "817f007c5d0bf8258cb8d2ab85d2ca8cb31d9cb888f83d0aca384b0fbd540b3c0f0c2917bb2136e71bbdde9b7aa4da5a9e1b70ad21701b5ff57b0dbee1170b05",
+ "head_hash": "7b17008eec5130c6ec0720475f0a9bfce19f72986481b737b3aab93e8fe73349",
+ "hg_checkpoint": 1,
+ "ledger": "/vectors/ledger",
+ "ledger_id": "c32e25c4c5ff980b86dbf8b082c018b1bd76dfce18817ec9bbd783474ab1e578",
+ "ledger_version": 1,
+ "policy_version": "96f2ed88c81208ab",
+ "reason": "session-end",
+ "records": 23,
+ "reviewer_model": "qwen3.5:9b",
+ "sig_version": 1,
+ "signature": "edd71f6a6312011d2bfd1596558ebd466369087c0967a14550bc6e59afbcd09300749f6d6daa2777b974c4af5cb82fd730534fec151db3780095afc82387a40d",
+ "signed": true,
+ "signer_pubkey": "98b108bfe5783ab421ae5bdde1f294e5050fecaecc932b2d43d30a194541fc45",
+ "ts": "2026-10-05T12:00:47+00:00"
+}

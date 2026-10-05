@@ -200,21 +200,30 @@ def test_rebuild_that_strips_every_mac_is_caught_only_by_checkpoints(tmp_path):
     assert not rep.ok and any("none for this ledger" in x for x in rep.lines)
 
 
-def test_deleting_from_the_middle_leaves_a_counter_gap(tmp_path):
+def test_deleting_from_the_middle_breaks_the_next_mac(tmp_path):
+    # Before MAC v2 this showed only as a counter gap; v2 binds seq and prev_hash.
     recs = vec_recs()
     del recs[5]
     text = rebuild(recs)
     assert ledger.verify_chain(as_ledger(tmp_path, text)) == []
-    assert any("records removed" in g for g in macs(text).gaps)
+    assert macs(text).bad[0].startswith("record 5 ")
 
 
-def test_reordering_in_one_session_leaves_a_counter_gap_and_breaks_ordering():
+def test_reordering_in_one_session_breaks_the_mac_and_ordering():
     recs = vec_recs()
     recs[2], recs[3] = recs[3], recs[2]              # gate.executed before its gate.decision
     text = rebuild(recs)
-    assert any("reordered" in g for g in macs(text).gaps)
+    assert macs(text).bad[0].startswith("record 2 ")
     problems = rv.verify(VEC, ledger_text=text, checkpoints=[])
     assert any("(O4)" in p for p in problems)
+
+
+def test_the_counter_still_catches_a_gap_in_v1_records(tmp_path):
+    # Old (v1) records: content-only MACs, so a deletion shows as a counter gap.
+    recs = lines((ROOT / "tests" / "fixtures" / "receipts-v1" / "ledger.jsonl").read_text())
+    del recs[5]
+    text = rebuild(recs)
+    assert any("records removed" in g for g in macs(text).gaps)
 
 
 def test_tail_truncation_passes_chain_and_macs_and_is_caught_only_by_a_later_checkpoint(tmp_path):
@@ -228,7 +237,8 @@ def test_tail_truncation_passes_chain_and_macs_and_is_caught_only_by_a_later_che
     assert receipts.verify_anchors(led, only_first).ok                   # NOT caught: no anchor saw the tail
 
 
-def test_reordering_across_sessions_is_not_caught_without_an_anchor(tmp_path):
+def test_reordering_across_sessions_breaks_the_mac(tmp_path):
+    # Before MAC v2 this passed: MACs bound neither seq nor prev_hash. v2 binds both.
     led = tmp_path / "x"
     for i in range(2):
         for s in ("s1", "s2"):
@@ -238,29 +248,70 @@ def test_reordering_across_sessions_is_not_caught_without_an_anchor(tmp_path):
     recs = ledger.read_all(led)
     recs[1], recs[2] = recs[2], recs[1]               # s2's first record and s1's second swap places
     text = rebuild(recs)
-    assert ledger.verify_chain(as_ledger(tmp_path, text)) == [] and macs(text).ok
+    assert ledger.verify_chain(as_ledger(tmp_path, text)) == []
+    assert macs(text).bad and not macs(text).ok
+    assert any("MAC does not verify" in p for p in rv.verify(VEC, ledger_text=text, checkpoints=[]))
 
 
-def test_a_forged_unkeyed_policy_record_is_not_flagged_but_a_forged_gate_record_is():
-    for action, flagged in (("policy.changed", False), ("gate.decision", True)):
-        recs = vec_recs()
-        recs.insert(5, {"v": 1, "action": action, "agent": "homestead-gate", "session": "vectors",
-                        "target": "gate:policy", "summary": "forged", "meta": {}, "ts": recs[4]["ts"]})
-        text = rebuild(recs)
-        assert bool(macs(text).stripped) is flagged, action
+@pytest.mark.parametrize("action", ["policy.changed", "gate.decision", "egress.denied"])
+def test_a_forged_unkeyed_record_is_flagged_and_breaks_the_next_mac(action):
+    # Before: only gate.* records were flagged; policy.* and egress.* were not.
+    recs = vec_recs()
+    recs.insert(5, {"v": 1, "action": action, "agent": "homestead-gate", "session": "vectors",
+                    "target": "gate:policy", "summary": "forged", "meta": {}, "ts": recs[4]["ts"]})
+    text = rebuild(recs)
+    rep = macs(text)
+    assert rep.stripped and "record 5 " in rep.stripped[0], action
+    assert rep.bad and rep.bad[0].startswith("record 6 ")        # its successor's prev_hash moved
+    assert any("record 5: no MAC" in p for p in rv.verify(VEC, ledger_text=text, checkpoints=[]))
 
 
-def test_stripping_every_mac_from_the_first_sessions_passes_the_mac_check(tmp_path):
+def test_unkeyed_egress_records_from_before_mac_v2_are_not_flagged():
+    # `run` wrote egress.denied without a MAC before v2; existing ledgers must keep sealing.
+    recs = lines((ROOT / "tests" / "fixtures" / "receipts-v1" / "ledger.jsonl").read_text())
+    recs.insert(5, {"v": 1, "action": "egress.denied", "agent": "homestead-gate", "session": "x",
+                    "target": "egress", "summary": "blocked", "meta": {"host": "h", "reason": "r"},
+                    "phase": "pre_execution", "ts": recs[4]["ts"]})
+    rep = receipts.verify_macs(lines(rebuild(recs)), KEYS.mac_key)
+    assert not rep.stripped and not rep.gaps
+    assert all("record 4" not in b and "record 5" not in b for b in rep.bad)
+
+
+def test_stripping_every_mac_from_the_first_sessions_is_caught(tmp_path):
+    # Before: the stripped records read as history from before MACs began (unkeyed_before).
     led = tmp_path / "x"
     for s in ("s1", "s1", "s2", "s2"):
         receipts.append(KEYS.mac_key, "gate.request", target="gate:email", summary=s, meta={"request_id": s},
                         vault=led, agent="homestead-gate", session=s, phase=ledger.PHASE_PRE)
     recs = ledger.read_all(led)
+    assert [r["meta"]["hg_mac"]["began"] for r in recs] == [0, 0, 0, 0]
     for r in recs[:2]:
         r["meta"].pop("hg_mac")                       # looks like history written before MACs began
     text = rebuild(recs)
     rep = macs(text)
-    assert rep.ok and rep.unkeyed_before == 2         # NOT caught by MACs: only the stored head or an anchor
+    assert not rep.ok and rep.bad[0].startswith("record 2 ")    # its prev_hash moved: the MAC binds it
+    assert any("record 2: MAC does not verify" in p for p in rv.verify(VEC, ledger_text=text, checkpoints=[]))
+
+
+def test_a_began_marker_after_the_first_keyed_record_is_reported():
+    # The `began` claim inside a good v2 MAC must name the first keyed record. Simulated with records
+    # MAC'd under a key we hold, where the writer claims MACs began earlier than the file shows.
+    recs = []
+    prev = ledger.GENESIS_HASH
+    for i in range(3):
+        r = {"v": 1, "seq": i, "ts": "t", "agent": "homestead-gate", "session": "s", "action": "gate.request",
+             "target": "gate:email", "summary": str(i), "meta": {}, "prev_hash": prev, "phase": "pre_execution"}
+        if i:
+            r["meta"]["hg_mac"] = {"v": 2, "n": i - 1, "alg": "hmac-sha256", "began": 0}
+            r["meta"]["hg_mac"]["mac"] = __import__("hmac").new(KEYS.mac_key, receipts._mac_input_v2(r),
+                                                                "sha256").hexdigest()
+        r["hash"] = ledger.record_hash(r)
+        prev = r["hash"]
+        recs.append(r)
+    rep = receipts.verify_macs(recs, KEYS.mac_key)
+    assert not rep.bad and rep.stripped and "MACs began at record 0" in rep.stripped[-1]
+    assert "record 0 (gate.request)" not in " ".join(rep.stripped[:-1])
+    assert any("MACs began at record 0" in p for p in rv.check_macs(recs, KEYS.mac_key))
 
 
 def test_the_signer_pin_does_not_apply_to_an_unsigned_anchor(tmp_path):
@@ -309,3 +360,50 @@ def test_bodies_and_reviewer_reasons_never_reach_the_ledger(tmp_path):
 def test_no_long_dashes(path):
     text = (ROOT / path).read_text(encoding="utf-8")
     assert chr(0x2014) not in text and chr(0x2013) not in text
+
+
+# ---- MAC v2 writer: the same bytes as homestead-memory's ledger.append ------------------------------
+
+def test_the_gate_writer_is_byte_identical_to_ledger_append(tmp_path, monkeypatch):
+    from homestead_memory.core import provenance
+    monkeypatch.setattr(provenance, "now_ts", lambda: "2026-10-05T12:00:00+00:00")
+    a, b = tmp_path / "a", tmp_path / "b"
+    for i, phase in enumerate((ledger.PHASE_PRE, None, ledger.PHASE_POST)):
+        rec = receipts.append(KEYS.mac_key, "gate.request", target="gate:email", summary=f"café {i}",
+                              meta={"request_id": str(i), "n": [1, 2.5]}, vault=a, agent="homestead-gate",
+                              session="s", phase=phase)
+        ledger.append("gate.request", target="gate:email", summary=f"café {i}", meta=rec["meta"], vault=b,
+                      agent="homestead-gate", session="s", phase=phase)
+    assert (a / ledger.LEDGER_REL).read_bytes() == (b / ledger.LEDGER_REL).read_bytes()
+
+
+def test_gate_and_plain_writers_interleave_on_one_chain(tmp_path):
+    from homestead_memory import cli as hsm
+    led = tmp_path / "l"
+    for i in range(3):
+        receipts.append(KEYS.mac_key, "gate.request", target="gate:email", summary=str(i), meta={},
+                        vault=led, agent="homestead-gate", session="s", phase=ledger.PHASE_PRE)
+        ledger.append("note", summary=str(i), vault=led, agent="someone-else", session="o")
+    assert ledger.verify_chain(led) == []
+    assert receipts.verify_macs(ledger.read_all(led), KEYS.mac_key).ok
+    assert hsm.main(["watch", str(led), "-n", "3"]) == 0
+
+
+def test_v1_ledgers_from_before_this_change_still_verify(tmp_path):
+    v1 = ROOT / "tests" / "fixtures" / "receipts-v1"           # the v0.1 vectors as first published
+    text = (v1 / "ledger.jsonl").read_text()
+    led = as_ledger(tmp_path, text)
+    assert ledger.verify_chain(led) == []
+    rep = receipts.verify_macs(ledger.read_all(led), KEYS.mac_key)
+    assert rep.ok and rep.checked == 23
+    assert receipts.verify_anchors(led, v1 / "anchors", signer=KEYS.pubkey).ok
+    assert rv.check_chain(text) == [] and rv.check_macs(lines(text), KEYS.mac_key) == []
+    for cp in lines((v1 / "checkpoints.jsonl").read_text()):
+        assert rv.check_checkpoint(cp, lines(text), signer=KEYS.pubkey) == []
+    # and a v2 gate keeps appending to it: the new records verify, the old ones still do
+    receipts.append(KEYS.mac_key, "gate.request", target="gate:email", summary="new", meta={}, vault=led,
+                    agent="homestead-gate", session="vectors", phase=ledger.PHASE_PRE)
+    recs = ledger.read_all(led)
+    assert recs[-1]["meta"]["hg_mac"]["v"] == 2 and recs[-1]["meta"]["hg_mac"]["began"] == 0
+    assert recs[-1]["meta"]["hg_mac"]["n"] == 23                # continues the session's v1 counter
+    assert receipts.verify_macs(recs, KEYS.mac_key).ok and rv.check_macs(recs, KEYS.mac_key) == []

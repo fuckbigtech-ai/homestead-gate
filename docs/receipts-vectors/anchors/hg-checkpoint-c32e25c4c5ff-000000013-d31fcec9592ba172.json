@@ -1,0 +1,19 @@
+{
+ "alg": "ed25519",
+ "attestation": "hsm-checkpoint v1 head=d31fcec9592ba172caed40e9b0cda3881b86f42df9847246ba9161703af1d4f5 records=13 ts=2026-10-05T12:00:26+00:00 pubkey=98b108bfe5783ab421ae5bdde1f294e5050fecaecc932b2d43d30a194541fc45 sig=a1eabc8e3c674cc63e5cf0369c24465959f2d2f107723b03ac085b347e4f4814276bff996854412a33193ed90983ed311afdec7fa5327de39353c559b26e9609",
+ "gate_signature": "a38bd3bfc2513db25e918a182608f5fc75e5bc5ef86709665a7ac443e7ab246be5e8c978f024c8ac7a496f65cc3e4256aadc0114d2a4836baa22bd4258c4530c",
+ "head_hash": "d31fcec9592ba172caed40e9b0cda3881b86f42df9847246ba9161703af1d4f5",
+ "hg_checkpoint": 1,
+ "ledger": "/vectors/ledger",
+ "ledger_id": "c32e25c4c5ff980b86dbf8b082c018b1bd76dfce18817ec9bbd783474ab1e578",
+ "ledger_version": 1,
+ "policy_version": "96f2ed88c81208ab",
+ "reason": "scheduled-pass",
+ "records": 13,
+ "reviewer_model": "qwen3.5:9b",
+ "sig_version": 1,
+ "signature": "a1eabc8e3c674cc63e5cf0369c24465959f2d2f107723b03ac085b347e4f4814276bff996854412a33193ed90983ed311afdec7fa5327de39353c559b26e9609",
+ "signed": true,
+ "signer_pubkey": "98b108bfe5783ab421ae5bdde1f294e5050fecaecc932b2d43d30a194541fc45",
+ "ts": "2026-10-05T12:00:26+00:00"
+}

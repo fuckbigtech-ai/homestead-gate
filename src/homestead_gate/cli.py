@@ -464,6 +464,10 @@ def cmd_run(a) -> int:
         print("usage: homestead-gate run [--allow-host H] -- <agent command>", file=sys.stderr)
         return 2
     led = Path(a.ledger).expanduser()
+    from . import receipts
+    # egress records get a MAC like gate records when this machine already has the ledger key (`up`
+    # creates it). Loaded, never created here: `run` must not plant a key the gate never used.
+    keys = receipts.ledger_keys(create=False, warn=_err)
 
     import time as _time
     last: dict[str, float] = {}
@@ -477,9 +481,12 @@ def cmd_run(a) -> int:
             return
         last[host] = now
         print(f"  !! blocked egress to {host}: {why}", file=sys.stderr)
-        hl.append("egress.denied", target="egress", summary=f"blocked {host[:80]}: {why}",
-                  meta={"host": host[:200], "reason": why}, vault=led, agent="homestead-gate",
-                  phase=hl.PHASE_PRE)
+        kw = dict(target="egress", summary=f"blocked {host[:80]}: {why}", meta={"host": host[:200], "reason": why},
+                  vault=led, agent="homestead-gate", phase=hl.PHASE_PRE)
+        if keys is not None:
+            receipts.append(keys.mac_key, "egress.denied", session=None, **kw)
+        else:
+            hl.append("egress.denied", **kw)
 
     return run(cmd, allow_hosts=a.allow_host, gate_port=a.gate_port, model_port=a.model_port,
                gate_home=HOME, ledger=led, allow_read=a.allow_read, pass_env=a.pass_env,

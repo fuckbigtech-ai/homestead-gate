@@ -272,13 +272,16 @@ def test_the_mac_catches_a_rebuilt_record_when_the_key_is_here(tmp_path, ledger_
     ledger_key_store.key = saved
 
 
-def test_the_mac_counter_catches_a_deleted_record_and_a_stripped_mac(tmp_path):
+def test_the_mac_catches_a_deleted_record_and_a_stripped_mac(tmp_path):
     g = gate(tmp_path)
     fill(g, 3)
     led = tmp_path / "l"
     rebuild(led, drop=2)                                          # one record removed, chain recomputed
     m = receipts.verify_macs(ledger.read_all(led), keys().mac_key)
-    assert not m.bad and m.gaps and "records removed" in m.gaps[0]
+    # MAC v2 covers seq and prev_hash, so the record that now follows the gap fails its MAC (before v2,
+    # with content-only MACs, this showed as a counter gap instead; the counter check still runs on
+    # records whose MAC is good, but a failing record's counter is not trusted).
+    assert m.bad and m.bad[0].startswith("record 2 ")
 
     g2 = gate(tmp_path, ledger_dir=tmp_path / "l2")
     fill(g2, 2)
@@ -469,3 +472,26 @@ def test_a_malformed_anchor_file_is_reported_not_a_traceback(tmp_path):
         json.dumps({"ledger": str((tmp_path / "l").resolve()), "records": "many", "head_hash": "x"}))
     rep = receipts.verify_anchors(tmp_path / "l", anchors)
     assert not rep.ok and any("not a readable checkpoint" in line for line in rep.lines)
+
+
+@pytest.mark.parametrize("have_key", [True, False])
+def test_egress_records_get_a_mac_when_the_key_exists(tmp_path, monkeypatch, ledger_key_store, have_key):
+    from homestead_gate import sandbox
+    if have_key:
+        fill(gate(tmp_path), 1)                                   # `up` created the key and keyed the ledger
+
+    def fake_run(cmd, *, on_deny, **kw):
+        on_deny("evil.example", "host not on the allowlist")
+        return 0
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    led = tmp_path / "l"
+    assert cli_main(["run", "--ledger", str(led), "--", "true"]) == 0
+    recs = ledger.read_all(led)
+    eg = recs[-1]
+    assert eg["action"] == "egress.denied" and eg["phase"] == "pre_execution"
+    assert (receipts.MAC_FIELD in eg["meta"]) is have_key
+    assert ledger_key_store.key is None or have_key               # `run` never creates a key
+    if have_key:
+        assert receipts.verify_macs(recs, keys().mac_key).ok
+        rebuild(led, edit=len(recs) - 1)                          # the blocked host's record, rewritten
+        assert receipts.verify_macs(ledger.read_all(led), keys().mac_key).bad

@@ -18,11 +18,11 @@ close most of that gap, all gate-side and all backward compatible (old ledgers v
    chain cannot match a head that was anchored before the rebuild, and `watch --anchors DIR` says
    which anchored checkpoint is the first one the local chain no longer matches.
 
-3. A keyed MAC on every new gate record, in its meta (`hg_mac`). It covers the record's content and
-   a per-session counter, so without the key a rebuilt record fails its MAC, and a record deleted
-   from the middle of a session leaves a gap in the counter even when the plain chain was
-   recomputed. It cannot cover seq/ts/prev_hash, because homestead-memory assigns those inside its
-   own lock (the upstream proposal: compute the MAC inside `ledger.append`).
+3. A keyed MAC on every record the gate writes (gate, policy and, from `run`, egress records), in its
+   meta (`hg_mac`). Version 2 covers the whole record, including seq, ts and prev_hash, so without the
+   key a rebuilt record fails its MAC, and so does the record after anything inserted, deleted or
+   moved. A per-session counter and the seq where MACs began (`began`) are covered too. To compute it
+   inside homestead-memory's lock, `append` writes the line itself, exactly as ledger.append does.
 
 A checkpoint is never signed over a chain that does not verify, whose MACs fail, or that does not
 extend every earlier checkpoint it can see: local files, anchors, and the last sealed head, which is
@@ -50,7 +50,7 @@ from . import credstore
 
 CHECKPOINTS_FILE = "checkpoints.jsonl"       # in the ledger dir: every checkpoint this ledger got
 MAC_FIELD = "hg_mac"
-MAC_VERSION = 1
+MAC_VERSION = 2                              # 1: records written before 2026-10-05 (still verified)
 CHECKPOINT_VERSION = 1
 ANCHOR_PREFIX = "hg-checkpoint-"
 ANCHOR_TIMEOUT_S = 60
@@ -99,7 +99,8 @@ def ledger_keys(create: bool = True, warn: Callable[[str], None] = print) -> Key
 # ---------------------------------------------------------------- keyed records
 
 _counters: dict[tuple[str, str], int] = {}
-_locks: dict[tuple[str, str], threading.Lock] = {}
+_began: dict[str, int] = {}                  # ledger -> seq of its first MAC'd record, once known
+_locks: dict[str, threading.Lock] = {}
 _registry_lock = threading.Lock()
 
 
@@ -108,31 +109,77 @@ def _canon(obj) -> bytes:
 
 
 def _mac_input(*, n: int, agent: str, session: str, action: str, target, summary, phase, meta: dict) -> bytes:
-    return _canon({"v": MAC_VERSION, "n": n, "agent": agent, "session": session, "action": action,
+    """MAC v1 (records written before 2026-10-05): content and counter, not seq/ts/prev_hash."""
+    return _canon({"v": 1, "n": n, "agent": agent, "session": session, "action": action,
                    "target": target, "summary": summary, "phase": phase,
                    "meta": {k: v for k, v in meta.items() if k != MAC_FIELD}})
 
 
+def _mac_input_v2(rec: dict) -> bytes:
+    """MAC v2: the whole record as it is hashed (every key but `hash`, so seq, ts and prev_hash too),
+    with `mac` itself left out of meta.hg_mac. Binding prev_hash chains each MAC to the record before it:
+    a record inserted, deleted or moved anywhere before a v2 record breaks that record's MAC."""
+    body = {k: v for k, v in rec.items() if k != "hash"}
+    meta = dict(body.get("meta") or {})
+    meta[MAC_FIELD] = {k: v for k, v in (meta.get(MAC_FIELD) or {}).items() if k != "mac"}
+    body["meta"] = meta
+    return _canon(body)
+
+
+def _is_mac(r: dict) -> bool:
+    return isinstance(r.get("meta"), dict) and isinstance(r["meta"].get(MAC_FIELD), dict)
+
+
 def append(mac_key: bytes, action: str, *, target: str | None, summary: str | None, meta: dict,
-           vault: Path, agent: str, session: str, phase: str | None) -> dict:
-    """ledger.append with an HMAC in meta. The counter is per (ledger, session) across Gate objects
-    in this process, and the lock spans counter + append so file order matches counter order."""
+           vault: Path, agent: str, session: str | None, phase: str | None) -> dict:
+    """Append one record with an HMAC (v2) in meta.hg_mac, under homestead-memory's ledger lock.
+
+    This is homestead-memory's ledger.append, line for line (same lock file, same envelope, same
+    hash, same O_APPEND + fsync; tests/test_receipts_spec.py checks the bytes are identical), with one
+    difference: the MAC is computed inside the lock, after seq, ts and prev_hash are known, so it can
+    cover them. ledger.append takes its lock itself and the lock is not reentrant, so the gate cannot
+    wrap it. hg_mac also carries `n` (the per-session counter) and `began`: the seq of the first record
+    in this ledger that has a MAC, so stripping the MACs from the first sessions is detectable."""
+    root = Path(vault).expanduser()             # homestead_memory.core.vault._resolve, for a given path
+    path = root / ledger.LEDGER_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
     agent_s, session_s = provenance.resolve_agent(agent), provenance.resolve_session(session)
-    k = (str(Path(vault).resolve()), session_s)
+    lk = str(root.resolve())
     with _registry_lock:
-        lock = _locks.setdefault(k, threading.Lock())
-    with lock:
+        lock = _locks.setdefault(lk, threading.Lock())
+    with lock, store.vault_lock(root):
+        prev = ledger._last_record(path)
+        seq = (prev["seq"] + 1) if prev else 0
+        k = (lk, session_s)
+        scan = None
+        if lk not in _began or _counters.get(k) is None:
+            scan = ledger.read_all(root) if prev else []
+        if lk not in _began:
+            first = next((r.get("seq") for r in scan if _is_mac(r)), None)
+            if isinstance(first, int):
+                _began[lk] = first
+        began = _began.get(lk, seq)
         n = _counters.get(k)
-        if n is None:                                # a session resumed in a new Gate continues its count
-            n = 1 + max((int(r["meta"][MAC_FIELD]["n"]) for r in ledger.read_all(vault)
-                         if r.get("session") == session_s and isinstance(r.get("meta"), dict)
-                         and isinstance(r["meta"].get(MAC_FIELD), dict)), default=-1)
+        if n is None:                            # a session resumed in a new process continues its count
+            n = 1 + max((int(r["meta"][MAC_FIELD]["n"]) for r in scan
+                         if r.get("session") == session_s and _is_mac(r)), default=-1)
         clean = json.loads(json.dumps(meta or {}))   # exactly what a reader will parse back
-        mac = hmac.new(mac_key, _mac_input(n=n, agent=agent_s, session=session_s, action=action, target=target,
-                                           summary=summary, phase=phase, meta=clean), hashlib.sha256).hexdigest()
-        clean[MAC_FIELD] = {"v": MAC_VERSION, "n": n, "alg": "hmac-sha256", "mac": mac}
-        rec = ledger.append(action, target=target, summary=summary, meta=clean, vault=vault,
-                            agent=agent, session=session, phase=phase)
+        clean[MAC_FIELD] = {"v": MAC_VERSION, "n": n, "alg": "hmac-sha256", "began": began}
+        rec = {"v": ledger.LEDGER_VERSION, "seq": seq, "ts": provenance.now_ts(), "agent": agent_s,
+               "session": session_s, "action": action, "target": target, "summary": summary,
+               "meta": clean, "prev_hash": prev["hash"] if prev else ledger.GENESIS_HASH}
+        if phase:
+            rec["phase"] = phase
+        clean[MAC_FIELD]["mac"] = hmac.new(mac_key, _mac_input_v2(rec), hashlib.sha256).hexdigest()
+        rec["hash"] = ledger.record_hash(rec)
+        line = json.dumps(rec, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, line.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        _began.setdefault(lk, began)
         _counters[k] = n + 1
         return rec
 
@@ -143,7 +190,7 @@ class MacReport:
     unkeyed_before: int = 0                   # records written before MACs began (old ledgers): fine
     bad: list[str] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
-    stripped: list[str] = field(default_factory=list)   # gate records without a MAC after MACs began
+    stripped: list[str] = field(default_factory=list)   # records without a MAC after MACs began
 
     @property
     def ok(self) -> bool:
@@ -157,40 +204,67 @@ def has_macs(recs: list[dict]) -> bool:
     return any(isinstance(r.get("meta"), dict) and MAC_FIELD in r["meta"] for r in recs)
 
 
+# Records that must carry a MAC once MACs began. egress.denied only from the first v2 record on: before
+# that, `run` wrote them without one, and flagging those would make seal refuse every existing ledger.
+def _must_mac(r: dict, v2_seen: bool) -> bool:
+    if r.get("agent") != "homestead-gate":
+        return False
+    a = str(r.get("action", ""))
+    return a.startswith(("gate.", "policy.")) or (v2_seen and a.startswith("egress."))
+
+
 def verify_macs(recs: list[dict], mac_key: bytes) -> MacReport:
     rep = MacReport()
     expected: dict[str, int] = {}
-    began = False
+    began = v2_seen = False
+    first = next((r.get("seq") for r in recs if _is_mac(r)), None)
+    claims: set = set()
     for i, r in enumerate(recs):
         meta = r.get("meta") if isinstance(r.get("meta"), dict) else {}
         m = meta.get(MAC_FIELD)
         if not isinstance(m, dict):
             if not began:
                 rep.unkeyed_before += 1
-            elif r.get("agent") == "homestead-gate" and str(r.get("action", "")).startswith("gate."):
-                rep.stripped.append(f"record {i} ({r.get('action')}) is a gate record with no MAC, written after "
-                                    "MACs began: forged, or written while the key store was unavailable")
+            elif _must_mac(r, v2_seen):
+                rep.stripped.append(f"record {i} ({r.get('action')}) has no MAC, written after MACs began: "
+                                    "forged, or written while the key store was unavailable")
             continue
         began = True
         rep.checked += 1
         try:
-            n = int(m["n"])
-            want = hmac.new(mac_key, _mac_input(n=n, agent=r.get("agent"), session=r.get("session"),
-                                                action=r.get("action"), target=r.get("target"),
-                                                summary=r.get("summary"), phase=r.get("phase"), meta=meta),
-                            hashlib.sha256).hexdigest()
+            n, v = int(m["n"]), m.get("v")
+            if v == 1:
+                inp = _mac_input(n=n, agent=r.get("agent"), session=r.get("session"), action=r.get("action"),
+                                 target=r.get("target"), summary=r.get("summary"), phase=r.get("phase"), meta=meta)
+            elif v == 2:
+                inp = _mac_input_v2(r)
+            else:
+                raise ValueError(f"unknown MAC version {v!r}")
+            want = hmac.new(mac_key, inp, hashlib.sha256).hexdigest()
             good = hmac.compare_digest(want, str(m.get("mac", "")))
         except (KeyError, TypeError, ValueError):
-            n, good = None, False
+            n, v, good = None, None, False
         if not good:
-            rep.bad.append(f"record {i} ({r.get('action')}) fails its MAC: rewritten without the key")
+            rep.bad.append(f"record {i} ({r.get('action')}) fails its MAC: rewritten, inserted, removed or "
+                           "moved without the key")
+            continue
+        if v == 2:
+            v2_seen = True
+            claims.add(m.get("began"))
         s = str(r.get("session"))
-        if n is not None and good:
-            exp = expected.get(s, 0)                 # every session's counter starts at 0
-            if n != exp:
-                rep.gaps.append(f"session {s}: record {i} has MAC counter {n}, expected {exp} "
-                                + ("(records removed)" if n > exp else "(records reordered or duplicated)"))
-            expected[s] = max(n + 1, exp)
+        exp = expected.get(s, 0)                 # every session's counter starts at 0
+        if n != exp:
+            rep.gaps.append(f"session {s}: record {i} has MAC counter {n}, expected {exp} "
+                            + ("(records removed)" if n > exp else "(records reordered or duplicated)"))
+        expected[s] = max(n + 1, exp)
+    for b in sorted(claims, key=str):
+        if b != first:
+            pre = [j for j, r in enumerate(recs) if not _is_mac(r) and isinstance(b, int)
+                   and isinstance(r.get("seq"), int) and b <= r["seq"] < (first if isinstance(first, int) else 0)
+                   and _must_mac(r, False)]
+            rep.stripped.append(f"MACs began at record {b} (say the keyed records), but the first record with a "
+                                f"MAC is {first}: the MACs of the records before it were stripped"
+                                + (f" (records {pre[0]}..{pre[-1]})" if pre else ""))
     return rep
 
 
