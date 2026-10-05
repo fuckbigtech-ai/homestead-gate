@@ -250,6 +250,39 @@ def test_a_forged_unkeyed_policy_record_is_not_flagged_but_a_forged_gate_record_
         assert bool(macs(text).stripped) is flagged, action
 
 
+def test_stripping_every_mac_from_the_first_sessions_passes_the_mac_check(tmp_path):
+    led = tmp_path / "x"
+    for s in ("s1", "s1", "s2", "s2"):
+        receipts.append(KEYS.mac_key, "gate.request", target="gate:email", summary=s, meta={"request_id": s},
+                        vault=led, agent="homestead-gate", session=s, phase=ledger.PHASE_PRE)
+    recs = ledger.read_all(led)
+    for r in recs[:2]:
+        r["meta"].pop("hg_mac")                       # looks like history written before MACs began
+    text = rebuild(recs)
+    rep = macs(text)
+    assert rep.ok and rep.unkeyed_before == 2         # NOT caught by MACs: only the stored head or an anchor
+
+
+def test_the_signer_pin_does_not_apply_to_an_unsigned_anchor(tmp_path):
+    led = as_ledger(tmp_path)
+    recs = ledger.read_all(led)
+    cp = {"hg_checkpoint": 1, "head_hash": recs[-1]["hash"], "records": len(recs), "ts": "t",
+          "ledger": str(led.resolve()), "ledger_id": recs[0]["hash"], "signed": False,
+          "signer_pubkey": None, "signature": None}
+    d = tmp_path / "a"
+    d.mkdir()
+    (d / f"{receipts.anchor_name(cp)}.json").write_text(json.dumps(cp))
+    assert receipts.verify_anchors(led, d, signer=KEYS.pubkey).ok        # passes despite --signer
+
+
+def test_executed_wallet_receipts_carry_the_calldata(tmp_path):
+    g = Gate(policy=Policy(user_email=rv.ME, user_wallet=rv.WALLET), reviewer=None, approver=scripted(),
+             ledger_dir=tmp_path / "l", task="t", session="t", outbox=tmp_path / "o")
+    g.submit({"action": {"type": "wallet_tx", "chain_id": 11155111, "to": rv.WALLET, "value_eth": 0.001,
+                         "data": "0xdeadbeef"}})                         # to self: policy auto-approves
+    assert "0xdeadbeef" in (tmp_path / "l" / ledger.LEDGER_REL).read_text()
+
+
 def test_mac_is_unchecked_without_the_key():
     rep = receipts.verify_macs(vec_recs(), b"\0" * 32)
     assert len(rep.bad) == 23                         # a wrong key fails every record; no key checks none

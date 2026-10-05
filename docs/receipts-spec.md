@@ -20,8 +20,9 @@ never hold the email body or the model's free-text reasoning. They hold a finger
 action and of the rules that judged it, so an old "yes" cannot be reused for a different action or
 under different rules. Each record carries the hash of the one before it and a keyed MAC; the gate
 signs checkpoints of the whole log and can copy them off the machine. Someone holding only your files
-cannot quietly edit, delete or rebuild the history. Someone running code as you can rewrite only what
-no off-machine anchor has seen yet. The spec, a reference verifier that shares no code with the gate,
+cannot quietly edit, delete or rebuild anything a checkpoint has already covered, and cannot edit a
+single gate record without the key. Someone running code as you can rewrite only what no off-machine
+anchor has seen yet. The spec, a reference verifier that shares no code with the gate,
 and byte-for-byte test vectors are in the homestead-gate repository.
 
 ## 1. Scope
@@ -257,7 +258,7 @@ characters. It is generated on first use. Both working keys derive from it:
 
 ```
 mac_key     = HMAC-SHA256(master, "homestead-gate record mac v1")
-ed25519_sed = HMAC-SHA256(master, "homestead-gate checkpoint ed25519 v1")     # Ed25519 private seed
+ed25519_seed = HMAC-SHA256(master, "homestead-gate checkpoint ed25519 v1")     # Ed25519 private seed
 ```
 
 Verification on another machine loads the key only if it is already there; it never creates one.
@@ -385,7 +386,10 @@ signer public key, and published actions. A verifier MUST report every problem, 
 
    This is `receipts.verify_macs`.
 3. **Checkpoints (L3).** For each checkpoint, local or anchored:
-   1. if a signer is pinned, `signer_pubkey` MUST equal it (an empty pin fails);
+   1. if a signer is pinned, a signed checkpoint's `signer_pubkey` MUST equal it (an empty pin fails).
+      An honestly unsigned checkpoint (`signed: false`) is not held to the pin: the code checks only
+      that the ledger extends it. A verifier SHOULD reject unsigned checkpoints when a signer is
+      pinned; **not implemented** in `verify_anchors`;
    2. verify `signature` over `"<head_hash>:<records>"`; if `gate_signature` is present, verify it over
       the JCS body;
    3. check that the ledger extends it (Section 7.3).
@@ -428,6 +432,8 @@ The ledger rows are asserted by tests in `tests/test_receipts_spec.py` (vectors)
 | rebuild with every MAC stripped | yes, if a checkpoint is visible | the stored head (owner's machine) or an anchor: stripping changes record 0, so anchors no longer recognise the ledger, or the anchored head is not a prefix |
 | strip MACs from some `gate.*` records after MACs began | yes | stripped-MAC check |
 | delete a record from the middle of a session, rebuild | yes | MAC counter gap |
+| strip the MACs from every record of the first sessions, rebuild | **no**, unless a checkpoint covered them | they read as history written before MACs began (`unkeyed_before`); later sessions' counters still start at 0 |
+| plant an unsigned anchor file that matches a rebuilt chain, with `--signer` set | **no** | the pin is checked only on signed checkpoints |
 | reorder records within one session, rebuild | yes | MAC counter gap, and ordering rule O4 when a post record moves above its decision |
 | delete the newest records (tail truncation) | only if a checkpoint covered them | anchors, local checkpoints or the stored head. Chain and MACs both pass. |
 | reorder records of different sessions, rebuild | **no**, unless an anchor covered them | MACs bind neither `seq` nor `prev_hash`, and each session's counter stays in order |
@@ -447,7 +453,7 @@ that an executed action had an effect, or who sat at the keyboard (`approver` na
 
 Never written to a receipt:
 
-- email bodies and subjects, attachments' content, transaction calldata (only fingerprints cover them);
+- email bodies, subjects and attachments (only fingerprints cover them);
 - the reviewer's free-text reason and suspicious span (they can quote the body);
 - the untrusted content the agent read (only its `source` labels);
 - web lookup titles, URLs and snippets (only kind, target, ok and a count);
@@ -455,7 +461,8 @@ Never written to a receipt:
 - the human's task text.
 
 Written, and so visible to anyone with the ledger: recipients (`to`, `lookup_target`, wallet
-addresses in summaries and `unsigned_tx`), the agent-reported `read_sources` strings (agent-controlled,
+addresses in summaries and `unsigned_tx`), the calldata of an executed wallet transaction
+(`gate.executed.result.unsigned_tx.data`, at most `max_calldata_bytes`), the agent-reported `read_sources` strings (agent-controlled,
 not length-limited), the approver's OS user, uid, host and tty, the dry-run `.eml` path, policy file
 path, and up to 300 characters of an adapter exception. The `.eml` file in the outbox does hold the
 body; it is not part of the ledger.
@@ -569,13 +576,16 @@ Consequences: the AAT chain is a separate chain. The native `hash` is not carrie
 cannot be matched to a native checkpoint by hash (only through `record_id`, which is derived from it).
 The export is unsigned: `sign_p1363` (ECDSA P-256, IEEE P1363 `r||s`, base64url) exists but nothing calls
 it. -01 asks for UUID v4 `record_id` and `session_id`; the export uses neither. Human approvals export
-as `success`, and nothing exports as `escalated`.
+as `success`, `egress.denied` (a blocked connection) exports as `success`, and nothing exports as
+`escalated`.
 
 ## 15. Not implemented
 
 - Ordering rules O1 to O6 in `watch` or `hsm watch` (only the vector tool checks them).
 - MACs that cover `seq`, `ts` and `prev_hash` (proposed: compute the MAC inside `ledger.append`).
 - MACs on `egress.denied` records, and stripped-MAC detection for `policy.*` records.
+- Detection of a MAC-less prefix after the key existed (a MAC-less start reads as pre-MAC history).
+- The signer pin on unsigned checkpoints.
 - A checkpoint after every decision; today the gate seals at session ends, passes and `watch`.
 - A built-in RFC 3161 client, or checking TSA replies in `watch`.
 - Recording a hash of the human's task in `gate.request`.
