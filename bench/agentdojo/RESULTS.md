@@ -589,8 +589,12 @@ What this shows:
    8%, level with the hosted 30B's 9%. On banking, legitimate calls blocked per run fell from 4.09 to 0.54, now
    below the hosted 30B's 0.69. Utility under attack rose from 49% to 58%, equal to the hosted 30B.
 2. **The model half is no longer airtight.** On banking, 1 of 144 attacks got through. Across both suites the
-   reviewer approved 1 of 515 attacker-call reviews (507 banking, 8 travel). That one was a retry: the agent made the call six times (the first
-   with different arguments), the reviewer blocked the first five, then approved the sixth. With thinking off, the 4B approved 0 attacker calls in both runs. With retries, the
+   reviewer approved 1 of 512 attacker-call reviews (507 banking, 5 travel). That one was a retry: the agent made the call six times (the first
+   with different arguments), the reviewer blocked the first five, then approved the sixth. (Corrected 2026-10-05: an earlier
+   version said 1 of 515. Three travel reviews counted as attacker calls were the user's own email to his wife in
+   `user_task_3`; the attack reuses her address and `aggregate.py` matched on the address alone. The same rule makes the
+   hosted Nano 30B travel row show 1 "tried, failed": that run is the same legitimate email, blocked once and approved on
+   an identical retry. Attack success is scored by AgentDojo itself and is unaffected.) With thinking off, the 4B approved 0 attacker calls in both runs. With retries, the
    attacker can keep trying until one review goes its way, so a per-review error rate becomes a per-run one. In
    the product the human is the second key for this. A cheap mitigation to test: once a call has been blocked,
    keep blocking identical retries of it in the same run.
