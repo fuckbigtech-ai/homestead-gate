@@ -666,18 +666,19 @@ editing one record breaks every hash after it. On its own that is tamper-evident
 not against someone with your files who rebuilds the whole chain, because the hashes are not keyed.
 Three things close most of that gap (`src/homestead_gate/receipts.py`):
 
-- **Signed checkpoints, automatically.** When a gate session ends (`up`, an assistant run, `--pending`),
-  after every scheduled pass, and on `homestead-gate watch`, the gate writes a checkpoint: head hash,
+- **Signed checkpoints, automatically.** After every action that ran, when a gate session ends (`up`, an
+  assistant run, `--pending`), after every scheduled pass, and on `homestead-gate watch`, the gate writes a
+  checkpoint (the per-action one skips `anchor_command`, which the next full one runs): head hash,
   record count, time, policy version and reviewer model. It is appended to `checkpoints.jsonl` in the
   ledger directory and copied to `.hsm/ledger.sig`, so `hsm watch` and `hsm checkpoint --verify` read it
   too. The signing key is not a file. It is derived from a random key the gate generates on first use and
   keeps in the OS credential store (keychain entry `homestead-gate-ledger-key`, read through
   `/usr/bin/security` like the other entries, with the same limits; libsecret on Linux). With no
   credential store, checkpoints are written unsigned and the gate says so; anchors still work.
-- **A keyed MAC on every new record.** The same key gives each new gate record an HMAC and a per-session
-  counter in its metadata. Rewriting a record without the key fails its MAC, and deleting a record from
-  the middle of a session leaves a gap in the counter, even if the chain hashes were recomputed. Older
-  records, written before this, verify exactly as before.
+- **A keyed MAC on every new record.** The same key gives each new gate, policy and egress record an HMAC
+  over the whole record, its position (`seq`, `prev_hash`) and time included, plus a per-session counter.
+  Rewriting, inserting, deleting or reordering a record without the key fails a MAC, even if the chain
+  hashes were recomputed. Older records, written before this, verify exactly as before.
 - **Anchors off the machine.** Each checkpoint can also be written somewhere someone with your machine
   can't rewrite later. A rebuilt chain can't match a head that was anchored before the rebuild.
 
@@ -762,9 +763,9 @@ Anchors count only if this attacker can't modify them (see above).
   the moment they are written; how much is exposed depends on how often you anchor.
 - **Time, without a TSA.** Without a timestamp authority, `ts` is the system clock. Order is still provable
   from `seq`, the chain and the MAC counter, but wall-clock time is not.
-- **Record MACs don't bind the record's position.** homestead-memory assigns `seq`, `ts` and `prev_hash`
-  inside its own lock, so the MAC covers the content and the per-session counter, not those fields. Egress
-  denials from `homestead-gate run` are written without a MAC.
+- **Records keyed before 2026-10-05.** Their MACs (v1) cover the content and the per-session counter, not
+  `seq`, `ts` or `prev_hash`, and egress denials from that time have no MAC. A ledger with only such records
+  keeps those limits; everything from the first newer record on is covered (docs/receipts-spec.md).
 - **A changed key.** If the keychain entry is lost, a new key is generated, and the keychain head goes with
   it. Anchors signed by the old key still verify. `watch` notes the change, and `--signer` turns it into a
   failure.
