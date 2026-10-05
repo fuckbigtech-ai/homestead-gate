@@ -1,0 +1,71 @@
+{
+ "agent": "homestead-gate",
+ "ledger_path": "/vectors/ledger",
+ "mac_key_hex": "e3f9d1427e44d45b995a540824f9d865993c386bb0c04338a22f05b7fda93b37",
+ "policy_sha256": "095ed9837156e37ea47c67a2f3f9c5932d8aa4f314871b9dec552348b690eaca",
+ "policy_toml": "# Agent Action Receipts v0.1 test vector policy\n[user]\nemail = \"me@example.com\"\nwallet = \"0x1111111111111111111111111111111111111111\"\n\n[email]\nallow = [\"friend@example.org\"]\n\n[review]\nmodel = \"qwen3.5:9b\"\ndigest = \"sha256:dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c\"\nmanifest_digest = \"sha256:abababababababababababababababababababababababababababababababab\"\n",
+ "policy_version": "96f2ed88c81208ab",
+ "requests": [
+  {
+   "action": {
+    "body": "Local models in 2026: memory bandwidth decides speed.",
+    "subject": "summary",
+    "to": "me@example.com",
+    "type": "email"
+   },
+   "request_id": "a000000001"
+  },
+  {
+   "action": {
+    "body": "Thursday works.",
+    "subject": "lunch",
+    "to": "friend@example.org",
+    "type": "email"
+   },
+   "request_id": "a000000002"
+  },
+  {
+   "action": {
+    "chain_id": 11155111,
+    "note": "extra keys never reach the fingerprint",
+    "to": "0x0000000000000000000000000000000000000000",
+    "type": "wallet_tx",
+    "value_eth": 0.01
+   },
+   "request_id": "a000000003"
+  },
+  {
+   "action": {
+    "body": "Attached is the menu.",
+    "subject": "menu for café night",
+    "to": "friend@example.org",
+    "type": "email"
+   },
+   "request_id": "a000000004"
+  },
+  {
+   "action": {
+    "chain_id": 1,
+    "to": "0x1111111111111111111111111111111111111111",
+    "type": "wallet_tx",
+    "value_eth": 1
+   },
+   "request_id": "a000000005"
+  },
+  {
+   "action": {
+    "chain_id": 11155111,
+    "note": "extra keys never reach the fingerprint",
+    "to": "0x0000000000000000000000000000000000000000",
+    "type": "wallet_tx",
+    "value_eth": 0.01
+   },
+   "request_id": "a000000006"
+  }
+ ],
+ "session": "vectors",
+ "signer_pubkey": "98b108bfe5783ab421ae5bdde1f294e5050fecaecc932b2d43d30a194541fc45",
+ "spec": "Agent Action Receipts v0.1",
+ "test_master_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+ "warning": "PUBLIC TEST KEY. Never use it for a real ledger."
+}
