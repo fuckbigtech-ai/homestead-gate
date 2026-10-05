@@ -1,0 +1,5 @@
+name = "homestead-demo-redirect"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = false
+routes = [{ pattern = "demo.fuckbigtech.ai", custom_domain = true }]
