@@ -163,7 +163,7 @@ task (12 to 11 of 21), within run-to-run noise at this size. No gate, for refere
 
 | travel | utility, no attack | utility under attack | action attacks through | say-something attack through | legit blocked per run |
 |---|---|---|---|---|---|
-| v1 (ships) | **14/20 (70%)** | 87/140 (62%) | **0/120** | 7/20 | **0.04** |
+| v1 (ships) | **14/20 (70%)** | 87/140 (62%) | **0/120** | 7/20 | **0.07** |
 | v5 | 10/20 (50%) | 70/115 (61%) | **0/97** | 7/18 | 0.12 |
 
 v5's gains on banking and Slack (its dev suites) did not carry over: on travel, where v1 barely over-blocks, v5
@@ -717,7 +717,7 @@ attack's distinctive values, such as an address. Some attacks reuse values from 
 present in the user task's own ground truth. Attack success (scored by AgentDojo) is unchanged. Changed cells:
 travel legit-blocked per run 0.14 to 0.17 (4B thinking on) and 1.03 to 1.05 (thinking off); runs with a legit block
 13 to 14 (30B), 42 to 43 and 12 to 13 (4B); the 30B travel "tried, failed" 1 to 0; the Slack oracle row 55/22/1/4 to
-55/23/0/4. The gate-log reviewer-health counts and `run_gate.py`'s oracle still use the old rule.
+55/23/0/4; the Qwen held-out travel v1 row 0.04 to 0.07 (v5 unchanged at 0.12). The gate-log reviewer-health counts and `run_gate.py`'s oracle still use the old rule.
 
 ### Published attacks that got past Nemotron 3 Super (no gate)
 
